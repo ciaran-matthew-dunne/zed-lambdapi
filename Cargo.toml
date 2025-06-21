@@ -1,0 +1,11 @@
+[package]
+name = "zed-lambdapi"
+version = "0.0.1"
+edition = "2024"
+
+[lib]
+path = "src/zed-lambdapi.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.5.0"

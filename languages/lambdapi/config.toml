@@ -1,0 +1,5 @@
+name = "LambdaPi"
+grammar = "lambdapi"
+path_suffixes = ["lp"]
+line_comments = ["//"]
+autoclose_before = "}])>'"

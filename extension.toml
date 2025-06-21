@@ -1,0 +1,15 @@
+id = "zed-lambdapi"
+name = "LambdaPi"
+version = "0.0.1"
+schema_version = 1
+authors = ["Ciarán Dunne <cciaranddunne@gmail.com>"]
+description = "Support for LambdaPi in Zed"
+repository = "https://github.com/ciaran-matthew-dunne/zed-lambdapi"
+
+[grammars.lambdapi]
+repository = "https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi"
+rev = "9646be83ae653bf51df7175515c870ec890cdbe6"
+
+[language_servers.lambdapi-lsp]
+name = "lambdapi-lsp"
+languages = ["LambdaPi"]
