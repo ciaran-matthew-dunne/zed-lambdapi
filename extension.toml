@@ -8,7 +8,7 @@ repository = "https://github.com/ciaran-matthew-dunne/zed-lambdapi"
 
 [grammars.lambdapi]
 repository = "https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi"
-rev = "9869ca91b778502cd3ed01f78e8aa4538be9032f"
+rev = "5ddb7eb4587c085da5a3b7cdb186b7de65b99644"
 path = "grammars"
 
 [language_servers.lambdapi-lsp]

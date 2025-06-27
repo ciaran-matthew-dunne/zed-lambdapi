@@ -2,4 +2,32 @@ name = "LambdaPi"
 grammar = "lambdapi"
 path_suffixes = ["lp"]
 line_comments = ["//"]
-autoclose_before = "}])>'"
+tab_size = 2
+hard_tabs = false
+first_line_pattern = "^#![[:space:]]*lambdapi"
+
+# Define brackets for auto-closing and matching
+brackets = [
+  { start = "(", end = ")", close = true, newline = true },
+  { start = "[", end = "]", close = true, newline = true },
+  { start = "{", end = "}", close = true, newline = true },
+  { start = "\"", end = "\"", close = true, newline = false },
+  { start = "/*", end = "*/", close = true, newline = true },
+  { start = "{|", end = "|}", close = true, newline = true },
+]
+
+# Word characters include special symbols used in identifiers
+word_characters = ["_", "$", "?", "@"]
+
+# Overrides for specific scopes
+[overrides.string]
+# In strings, disable some auto-closing brackets
+brackets = [
+  { start = "(", end = ")", close = false },
+  { start = "[", end = "]", close = false },
+  { start = "{", end = "}", close = false },
+]
+
+[overrides.comment]
+# In comments, disable all auto-closing brackets
+brackets = []
