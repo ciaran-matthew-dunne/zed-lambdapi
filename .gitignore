@@ -1,0 +1,10 @@
+# Zed clones grammar repos here during install
+grammars/lambdapi/
+grammars/*.wasm
+
+# Rust build
+target/
+Cargo.lock
+
+# Built extension WASM
+extension.wasm

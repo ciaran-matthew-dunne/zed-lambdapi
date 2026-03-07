@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""Lambdapi proof goals viewer for Zed editor.
+
+A companion terminal tool that displays proof goals from the Lambdapi LSP.
+Run in Zed's integrated terminal alongside your editor.
+
+Usage:
+    lp-goals <file.lp> [line] [col]       # Show goals at position
+    lp-goals <file.lp> --watch             # Watch mode: re-display on file change
+    lp-goals <file.lp> --interactive       # Interactive: type line:col to query
+
+Examples:
+    lp-goals nat.lp 15 2                   # Goals at line 15, col 2
+    lp-goals nat.lp --watch                # Watch file, show all proof goals
+    lp-goals nat.lp --interactive          # Type positions interactively
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import struct
+import threading
+
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+MAGENTA = "\033[35m"
+RESET = "\033[0m"
+RULE = f"{DIM}{'─' * 40}{RESET}"
+
+
+class LambdapiLSP:
+    """Minimal LSP client for Lambdapi's proof/goals request."""
+
+    def __init__(self, lib_root=None):
+        self.msg_id = 0
+        self.proc = None
+        self.lib_root = lib_root or self._find_lib_root()
+
+    def _find_lib_root(self):
+        prefix = os.environ.get("OPAM_SWITCH_PREFIX")
+        if prefix:
+            return os.path.join(prefix, "lib", "lambdapi", "lib_root")
+        home = os.path.expanduser("~")
+        default = os.path.join(home, ".opam", "default", "lib", "lambdapi", "lib_root")
+        if os.path.isdir(default):
+            return default
+        return None
+
+    def _find_lambdapi(self):
+        for path in os.environ.get("PATH", "").split(":"):
+            candidate = os.path.join(path, "lambdapi")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        return "lambdapi"
+
+    def start(self):
+        cmd = [self._find_lambdapi(), "lsp"]
+        if self.lib_root:
+            cmd.append(f"--lib-root={self.lib_root}")
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def stop(self):
+        if self.proc:
+            try:
+                self._send("shutdown", {})
+                self._notify("exit", {})
+                self.proc.stdin.close()
+                self.proc.wait(timeout=3)
+            except Exception:
+                self.proc.kill()
+            self.proc = None
+
+    def _next_id(self):
+        self.msg_id += 1
+        return self.msg_id
+
+    def _write(self, msg):
+        body = json.dumps(msg).encode("utf-8")
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+        self.proc.stdin.write(header + body)
+        self.proc.stdin.flush()
+
+    def _read(self):
+        headers = {}
+        while True:
+            line = self.proc.stdout.readline().decode("ascii").strip()
+            if not line:
+                break
+            key, _, val = line.partition(":")
+            headers[key.strip().lower()] = val.strip()
+        length = int(headers.get("content-length", 0))
+        if length == 0:
+            return None
+        body = self.proc.stdout.read(length)
+        return json.loads(body.decode("utf-8"))
+
+    def _send(self, method, params):
+        mid = self._next_id()
+        self._write({
+            "jsonrpc": "2.0",
+            "id": mid,
+            "method": method,
+            "params": params,
+        })
+        return mid
+
+    def _notify(self, method, params):
+        self._write({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        })
+
+    def _read_response(self, expected_id, timeout=30):
+        """Read messages until we get the response with expected_id."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            msg = self._read()
+            if msg is None:
+                continue
+            if msg.get("id") == expected_id:
+                return msg
+        return None
+
+    def _read_until_quiet(self, timeout=5):
+        """Read notifications until quiet for timeout seconds, collecting diagnostics."""
+        diagnostics = []
+        deadline = time.time() + timeout
+        # Set stdout to non-blocking temporarily
+        import select
+        while time.time() < deadline:
+            ready, _, _ = select.select([self.proc.stdout], [], [], 0.5)
+            if ready:
+                msg = self._read()
+                if msg and msg.get("method") == "textDocument/publishDiagnostics":
+                    diagnostics.append(msg)
+                deadline = time.time() + 1  # reset timeout on activity
+        return diagnostics
+
+    def initialize(self, root_uri):
+        mid = self._send("initialize", {
+            "processId": os.getpid(),
+            "rootUri": root_uri,
+            "capabilities": {},
+        })
+        resp = self._read_response(mid)
+        self._notify("initialized", {})
+        return resp
+
+    def open_file(self, uri, text):
+        self._notify("textDocument/didOpen", {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "lp",
+                "version": 1,
+                "text": text,
+            }
+        })
+
+    def change_file(self, uri, text, version):
+        self._notify("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}],
+        })
+
+    def get_goals(self, uri, line, col):
+        mid = self._send("proof/goals", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": col},
+        })
+        return self._read_response(mid, timeout=15)
+
+
+def format_goals(response):
+    """Format proof goals for terminal display."""
+    if not response or "result" not in response:
+        error = response.get("error", {}) if response else {}
+        msg = error.get("message", "no response from server")
+        return f"{RED}Error: {msg}{RESET}"
+
+    result = response["result"]
+    goals = result.get("goals")
+    logs = result.get("logs", "")
+
+    lines = []
+
+    if goals is None or len(goals) == 0:
+        lines.append(f"{DIM}No goals.{RESET}")
+    else:
+        for i, goal in enumerate(goals):
+            kind = goal.get("typeofgoal", "?")
+            hyps = goal.get("hyps", [])
+
+            if kind == "Typ":
+                gid = goal.get("gid", "?")
+                gtype = goal.get("type", "?")
+                lines.append(f"{BOLD}{CYAN}Goal {i+1}{RESET} {DIM}({gid}){RESET}")
+            elif kind == "Unif":
+                constr = goal.get("constr", "?")
+                lines.append(f"{BOLD}{MAGENTA}Unification goal {i+1}{RESET}")
+
+            # Hypotheses
+            if hyps:
+                max_name = max(len(h["hname"]) for h in hyps) if hyps else 0
+                for h in hyps:
+                    name = h["hname"]
+                    htype = h["htype"]
+                    lines.append(f"  {GREEN}{name:<{max_name}}{RESET} {DIM}:{RESET} {htype}")
+
+            lines.append(RULE)
+
+            if kind == "Typ":
+                lines.append(f"  {BOLD}{gtype}{RESET}")
+            elif kind == "Unif":
+                lines.append(f"  {BOLD}{constr}{RESET}")
+
+            lines.append("")
+
+    if logs and logs.strip():
+        lines.append(f"{DIM}--- Logs ---{RESET}")
+        lines.append(logs.strip())
+
+    return "\n".join(lines)
+
+
+def file_uri(path):
+    return "file://" + os.path.abspath(path)
+
+
+def clear_screen():
+    print("\033[2J\033[H", end="", flush=True)
+
+
+def run_once(filepath, line, col):
+    """Show goals at a specific position and exit."""
+    uri = file_uri(filepath)
+    root = file_uri(os.path.dirname(os.path.abspath(filepath)))
+
+    with open(filepath, "r") as f:
+        text = f.read()
+
+    lsp = LambdapiLSP()
+    lsp.start()
+    try:
+        lsp.initialize(root)
+        lsp.open_file(uri, text)
+        # Wait for the server to process the file
+        lsp._read_until_quiet(timeout=3)
+        resp = lsp.get_goals(uri, line, col)
+        print(format_goals(resp))
+    finally:
+        lsp.stop()
+
+
+def run_interactive(filepath):
+    """Interactive mode: type line:col to query goals."""
+    uri = file_uri(filepath)
+    root = file_uri(os.path.dirname(os.path.abspath(filepath)))
+
+    with open(filepath, "r") as f:
+        text = f.read()
+
+    lsp = LambdapiLSP()
+    lsp.start()
+    version = 1
+    try:
+        lsp.initialize(root)
+        lsp.open_file(uri, text)
+        lsp._read_until_quiet(timeout=3)
+
+        print(f"{BOLD}Lambdapi Goals{RESET} - {os.path.basename(filepath)}")
+        print(f"Type {CYAN}line:col{RESET} to query goals, {CYAN}r{RESET} to reload, {CYAN}q{RESET} to quit")
+        print()
+
+        while True:
+            try:
+                inp = input(f"{CYAN}>{RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if inp in ("q", "quit", "exit"):
+                break
+
+            if inp in ("r", "reload"):
+                with open(filepath, "r") as f:
+                    text = f.read()
+                version += 1
+                lsp.change_file(uri, text, version)
+                lsp._read_until_quiet(timeout=3)
+                print(f"{DIM}Reloaded.{RESET}")
+                continue
+
+            # Parse line:col
+            parts = inp.replace(",", ":").replace(" ", ":").split(":")
+            try:
+                line = int(parts[0]) - 1  # LSP is 0-indexed
+                col = int(parts[1]) if len(parts) > 1 else 0
+            except (ValueError, IndexError):
+                print(f"{RED}Enter line:col (e.g., 15:2){RESET}")
+                continue
+
+            resp = lsp.get_goals(uri, line, col)
+            print()
+            print(format_goals(resp))
+            print()
+    finally:
+        lsp.stop()
+
+
+def run_watch(filepath):
+    """Watch mode: monitor file for changes, show all diagnostic goals."""
+    uri = file_uri(filepath)
+    root = file_uri(os.path.dirname(os.path.abspath(filepath)))
+
+    lsp = LambdapiLSP()
+    lsp.start()
+    version = 1
+    last_mtime = 0
+
+    try:
+        lsp.initialize(root)
+
+        with open(filepath, "r") as f:
+            text = f.read()
+        lsp.open_file(uri, text)
+        last_mtime = os.path.getmtime(filepath)
+
+        clear_screen()
+        print(f"{BOLD}Lambdapi Goals{RESET} - {os.path.basename(filepath)} (watching)")
+        print(f"{DIM}Press Ctrl+C to stop{RESET}")
+        print()
+
+        # Wait for initial check and show diagnostics
+        diags = lsp._read_until_quiet(timeout=5)
+        _show_diagnostic_goals(diags)
+
+        while True:
+            time.sleep(0.5)
+            mtime = os.path.getmtime(filepath)
+            if mtime != last_mtime:
+                last_mtime = mtime
+                with open(filepath, "r") as f:
+                    text = f.read()
+                version += 1
+                lsp.change_file(uri, text, version)
+                time.sleep(0.2)
+
+                clear_screen()
+                print(f"{BOLD}Lambdapi Goals{RESET} - {os.path.basename(filepath)} (watching)")
+                print(f"{DIM}Updated at {time.strftime('%H:%M:%S')}{RESET}")
+                print()
+
+                diags = lsp._read_until_quiet(timeout=5)
+                _show_diagnostic_goals(diags)
+
+    except KeyboardInterrupt:
+        print(f"\n{DIM}Stopped.{RESET}")
+    finally:
+        lsp.stop()
+
+
+def _show_diagnostic_goals(diag_msgs):
+    """Show goal info from extended diagnostics (non-standard-lsp mode)."""
+    has_goals = False
+    for msg in diag_msgs:
+        params = msg.get("params", {})
+        for diag in params.get("diagnostics", []):
+            goal_info = diag.get("goal_info")
+            if goal_info and goal_info.get("goals"):
+                rng = diag.get("range", {})
+                start = rng.get("start", {})
+                line = start.get("line", 0) + 1
+                col = start.get("character", 0)
+                severity = diag.get("severity", 0)
+                message = diag.get("message", "")
+
+                sev_str = {1: f"{RED}error{RESET}", 3: f"{YELLOW}info{RESET}",
+                           4: f"{DIM}hint{RESET}"}.get(severity, f"({severity})")
+
+                print(f"{BOLD}Line {line}:{col}{RESET} [{sev_str}] {message}")
+                # Format the embedded goals
+                fake_resp = {"result": goal_info}
+                print(format_goals(fake_resp))
+                has_goals = True
+
+    if not has_goals:
+        # Show diagnostics summary even without goals
+        errors = []
+        for msg in diag_msgs:
+            params = msg.get("params", {})
+            for diag in params.get("diagnostics", []):
+                severity = diag.get("severity", 0)
+                message = diag.get("message", "")
+                rng = diag.get("range", {})
+                start = rng.get("start", {})
+                line = start.get("line", 0) + 1
+                if severity <= 2:
+                    errors.append(f"  {RED}L{line}{RESET}: {message}")
+                elif severity == 3:
+                    errors.append(f"  {YELLOW}L{line}{RESET}: {message}")
+
+        if errors:
+            for e in errors:
+                print(e)
+        else:
+            print(f"{GREEN}No errors, no goals.{RESET}")
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+
+    filepath = sys.argv[1]
+    if not os.path.isfile(filepath):
+        print(f"{RED}File not found: {filepath}{RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    if "--watch" in sys.argv:
+        run_watch(filepath)
+    elif "--interactive" in sys.argv or "-i" in sys.argv:
+        run_interactive(filepath)
+    elif len(sys.argv) >= 3:
+        try:
+            line = int(sys.argv[2]) - 1  # Convert to 0-indexed
+            col = int(sys.argv[3]) - 1 if len(sys.argv) > 3 else 0
+        except ValueError:
+            print(f"{RED}Invalid position. Usage: lp-goals file.lp line [col]{RESET}",
+                  file=sys.stderr)
+            sys.exit(1)
+        run_once(filepath, line, col)
+    else:
+        # Default to interactive mode
+        run_interactive(filepath)
+
+
+if __name__ == "__main__":
+    main()

@@ -14,6 +14,9 @@
 (symbol_command
   "symbol" @indent)
 
+(symbol_def_command
+  "symbol" @indent)
+
 (inductive_command
   "inductive" @indent)
 
@@ -67,35 +70,3 @@
   "abort"
 ] @outdent
 
-; Align certain constructs
-(rule
-  (hook_arrow) @align)
-
-(equation
-  (equiv) @align)
-
-(symbol_command
-  (assign) @align)
-
-(let_term
-  (assign) @align)
-
-(inductive_def
-  (assign) @align)
-
-; Branch points for alignment
-[
-  ";"
-  "|"
-  "with"
-] @branch
-
-; Indent continuation lines
-(term
-  (arrow) @indent.always)
-
-; Special handling for multi-line terms
-(saterm) @indent.auto
-
-; Don't indent at the top level
-(source_file) @indent.zero

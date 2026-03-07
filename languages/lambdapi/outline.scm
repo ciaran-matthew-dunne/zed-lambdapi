@@ -1,42 +1,34 @@
 ; Code outline/structure for Lambdapi
 
-; Symbol definitions
-; Theorem definitions (opaque symbols with proofs)
+; Symbol declarations
 (symbol_command
   (modifier)* @context
   "symbol" @context
-  (uid) @name
-  (param_list)*
-  ":"
-  (term)
-) @item
+  (uid) @name) @item
 
-; really, we should have 'inductive_command' here as well??
+; Symbol definitions
+(symbol_def_command
+  (modifier)* @context
+  "symbol" @context
+  (uid) @name) @item
 
 ; Inductive type definitions
 (inductive_def
-  (uid) @name
-  (param_list)*
-  (term)) @item
+  (uid) @name) @item
 
 ; Constructor definitions
 (constructor
-  (uid) @name
-  (param_list)*
-  (term) @context) @item
-
-(rule_command
-  "rule" @context
-  (rule)
-) @item
+  (uid) @name) @item
 
 ; Rule definitions
+(rule_command
+  "rule" @context
+  (rule)) @item
+
 (rule
-  ((term) @name
-   (hook_arrow) @context
-   (term) @name
-  )
-) @item
+  (term) @name
+  (hook_arrow) @context
+  (term) @context) @item
 
 ; Coerce rule definitions
 (coerce_rule_command
@@ -46,13 +38,7 @@
 
 ; Unification rule definitions
 (unif_rule_command
-  "unif_rule" @context
-  (unif_rule)
-) @item
-
-(unif_rule
-  (equation
-    (term) @name)) @item
+  "unif_rule" @context) @item
 
 ; Notation definitions
 (notation_command
@@ -69,17 +55,11 @@
 ; Let bindings in proofs
 (let_term
   "let" @context
-  (uid) @name
-  (param_list)*
-  (term)?) @item
+  (uid) @name) @item
 
 ; Query commands
 (query_command
   (query) @name) @item
-
-; Proof structure
-; (proof
-;   "begin" @name) @item
 
 ; Comments as documentation
 (comment) @annotation

@@ -2,12 +2,11 @@
 
 ; Fold proof blocks
 (proof) @fold
-
-; Fold subproofs
 (subproof) @fold
 
 ; Fold multi-line commands
 (symbol_command) @fold
+(symbol_def_command) @fold
 (inductive_command) @fold
 (rule_command) @fold
 (builtin_command) @fold
@@ -20,12 +19,10 @@
 
 ; Fold parameter lists when they span multiple lines
 (param_list
-  "("
-  ")" @fold.stop) @fold
+  "(" ")" @fold.stop) @fold
 
 (param_list
-  "["
-  "]" @fold.stop) @fold
+  "[" "]" @fold.stop) @fold
 
 ; Fold environments
 (env) @fold
@@ -43,11 +40,6 @@
 ; Fold comments
 (comment) @fold
 
-; Fold complex terms
-(term
-  (arrow)) @fold
-
 ; Fold equation lists in unif rules
 (unif_rule
-  "["
-  "]" @fold.stop) @fold
+  "[" "]" @fold.stop) @fold

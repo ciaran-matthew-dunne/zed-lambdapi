@@ -1,7 +1,10 @@
 ; Local variable definitions and references
 
-; Function/symbol definitions
+; Symbol definitions
 (symbol_command
+  (uid) @definition.function)
+
+(symbol_def_command
   (uid) @definition.function)
 
 ; Variable definitions in parameters
@@ -13,7 +16,7 @@
 (let_term
   (uid) @definition.variable)
 
-; Pattern variables in tactics
+; Tactic variable bindings
 (tactic
   "assume"
   (param
@@ -42,9 +45,9 @@
 (uid) @reference.variable
 (qid) @reference.variable
 (qid_expl) @reference.variable
+(term_id) @reference.variable
 
 ; Special references
-(term_id) @reference.variable
 (meta_var) @reference.special
 (pattern_var) @reference.special
 
@@ -56,6 +59,7 @@
 [
   (source_file)
   (symbol_command)
+  (symbol_def_command)
   (let_term)
   (proof)
   (subproof)

@@ -1,106 +1,175 @@
-; Keywords
+; ============================================
+; LambdaPi Syntax Highlighting for Zed
+; ============================================
+; Zed uses LAST-MATCH-WINS precedence, so generic fallbacks go first
+; and specific overrides go last.
+;
+; Zedoki palette mapping:
+;   @keyword       — red/pink (#ff6188)  — commands, tactics, flags
+;   @attribute     — cyan italic (#78dce8) — modifiers, notation directives
+;   @constant      — purple (#ab9df2)    — TYPE, pattern vars ($x), wildcards
+;   @function      — green (#a9dc76)     — symbol/definition names
+;   @constructor   — red/pink (#ff6188)  — inductive constructors
+;   @type          — cyan (#78dce8)      — inductive type names
+;   @comment       — gray italic (#727072)
+;   @string        — yellow (#ffd866)    — "..."
+;   @variable      — white (#fcfcfa)     — identifiers
+;   @variable.special — purple (#ab9df2) — wildcards, metavars
+;   @punctuation   — muted gray (#939293)
+;   @tag           — red/pink (#ff6188)  — module path prefixes
+
+; ============================================
+; COMMENTS
+; ============================================
+
+(comment) @comment
+
+; ============================================
+; GENERIC FALLBACKS (lowest precedence)
+; ============================================
+
+(uid) @variable
+(escaped_id) @variable
+
+; ============================================
+; KEYWORDS — red/pink
+; ============================================
+
+; Core commands
 [
-  "abort"
-  "admit"
-  "admitted"
-  "apply"
+  "symbol"
+  "inductive"
+  "require"
+  "open"
+  "rule"
+  "with"
+  "let"
+  "in"
   "as"
+  "begin"
+  "notation"
+  "unif_rule"
+  "coerce_rule"
+  "builtin"
+] @keyword
+
+; Proof end keywords
+(proof_end) @keyword
+
+; Queries
+[
   "assert"
   "assertnot"
-  "associative"
-  "assume"
-  "begin"
-  "builtin"
-  "coerce_rule"
-  "commutative"
   "compute"
-  "constant"
-  "end"
-  "eval"
-  "eval"
-  "fail"
-  "flag"
-  "generalize"
-  "have"
-  "in"
-  "induction"
-  "inductive"
-  "infix"
-  "injective"
-  "left"
-  "let"
-  "notation"
-  "off"
-  "on"
-  "opaque"
-  "open"
-  "orelse"
-  "postfix"
-  "prefix"
   "print"
-  "private"
-  "protected"
+  "debug"
+  "search"
+  "type"
   "prover"
   "prover_timeout"
+] @keyword
+
+(proofterm_query) @keyword
+
+; Flags
+[
+  "flag"
+  "verbose"
+] @keyword
+
+; ============================================
+; MODIFIERS — cyan italic
+; ============================================
+
+[
+  "constant"
+  "opaque"
+  "injective"
+  "sequential"
+  "associative"
+  "commutative"
+  "private"
+  "protected"
+] @attribute
+
+; Notation modifiers
+[
+  "left"
+  "right"
+  "infix"
+  "prefix"
+  "postfix"
   "quantifier"
+] @attribute
+
+; Flag values
+[
+  "on"
+  "off"
+] @attribute
+
+; ============================================
+; TACTICS — red/pink
+; ============================================
+
+[
+  "admit"
+  "apply"
+  "assume"
+  "change"
+  "eval"
+  "fail"
+  "generalize"
+  "have"
+  "induction"
+  "orelse"
   "refine"
   "reflexivity"
   "remove"
   "repeat"
-  "require"
   "rewrite"
-  "right"
-  "rule"
-  "search"
-  "sequential"
   "set"
   "simplify"
   "solve"
-  "symbol"
   "symmetry"
   "try"
-  "type"
-  "TYPE"
-  "unif_rule"
-  "verbose"
   "why3"
-  "with"
 ] @keyword
 
-; Operators
+; ============================================
+; OPERATORS & BINDERS — muted gray
+; ============================================
+
+(arrow) @punctuation.delimiter
+(assign) @punctuation.delimiter
+(equiv) @punctuation.delimiter
+(hook_arrow) @punctuation.delimiter
+(lambda) @punctuation.delimiter
+(pi) @punctuation.delimiter
+(turnstile) @punctuation.delimiter
+
+; ============================================
+; LITERALS
+; ============================================
+
+(int) @number
+(float) @number
+(string) @string
+
+; ============================================
+; PUNCTUATION — muted gray
+; ============================================
+
 [
-  "→"
-  "->"
-  "≔"
-  ":="
-  "≡"
-  "=="
-  "↪"
-  "|->"
-  "⊢"
-  "|-"
-  ":"
   ","
   ";"
-  "."
+  ":"
   "|"
-  "_"
+  "."
   "`"
   "@"
-  "$"
-  "+"
-  "-"
-] @operator
+] @punctuation.delimiter
 
-; Special symbols
-[
-  "λ"
-  "\\"
-  "Π"
-  "forall"
-] @keyword.function
-
-; Delimiters
 [
   "("
   ")"
@@ -110,155 +179,78 @@
   "}"
 ] @punctuation.bracket
 
-; Identifiers
-(uid) @variable
-(param "_" @variable.builtin)
-(param (uid) @variable.parameter)
-(regular_id) @variable
-(escaped_id) @variable
+; ============================================
+; ERROR HANDLING
+; ============================================
 
-; Qualified identifiers
-(qid) @variable
-(qid_expl) @variable
-(qualified_id) @variable
-(path) @namespace
+(ERROR) @error
 
-; Special identifiers
-(meta_var) @variable.special
-(pattern_var) @variable.special
+; ============================================
+; SPECIFIC OVERRIDES (highest precedence)
+; ============================================
+; Everything below here overrides the generic fallbacks above.
 
-; Type annotations
-(param_list
-  ":" @punctuation.delimiter
-  (term) @type)
+; --- Types — purple ---
 
-(symbol_command
-  ":" @punctuation.delimiter
-  (term) @type)
+"TYPE" @constant
+
+; --- Constructors — white (same as other symbols) ---
+
+(constructor
+  (uid) @variable)
+
+; --- Builtin bindings (builtin "T" ≔ τ) ---
+
+(builtin_command
+  "builtin" @keyword
+  (string) @string.special)
+
+(flag_query
+  (string) @string.special)
+
+; --- Variables in binding positions ---
+
+(param
+  (uid) @variable.parameter)
 
 (let_term
-  ":" @punctuation.delimiter
-  (term) @type)
+  "let" @keyword
+  (uid) @variable)
 
-(constructor
-  ":" @punctuation.delimiter
-  (term) @type)
-
-(inductive_def
-  ":" @punctuation.delimiter
-  (term) @type)
-
-(binder
-  ":" @punctuation.delimiter
-  (term) @type)
-
-(assert_query
-  ":" @punctuation.delimiter
-  (term) @type)
-
-; Function/symbol definitions
-(symbol_command
-  "symbol" @keyword
-  (uid) @function.definition)
-
-(constructor
-  (uid) @constructor)
-
-(inductive_def
-  (uid) @type.definition)
-
-; Rules
-(rule
-  (term) @function.special
-  (term) @function.special)
-
-(unif_rule
-  (equation) @function.special)
-
-; Literals
-(int) @number
-(float) @number.float
-(string) @string
-(priority) @number
-
-; Comments
-(comment) @comment
-
-; Proof tactics
+; Tactic bindings
 (tactic
-  [
-    "admit"
-    "apply"
-    "assume"
-    "eval"
-    "fail"
-    "generalize"
-    "have"
-    "induction"
-    "orelse"
-    "refine"
-    "reflexivity"
-    "remove"
-    "repeat"
-    "rewrite"
-    "set"
-    "simplify"
-    "solve"
-    "symmetry"
-    "try"
-    "why3"
-  ] @keyword.function)
-
-; Special tactic constructs
-(tactic
-  "have"
-  (uid) @variable.definition
-  ":"
-  (term) @type)
-
-(tactic
-  "set"
-  (uid) @variable.definition)
-
-(tactic
-  "generalize"
+  "have" @keyword
   (uid) @variable)
 
 (tactic
-  "assume"
-  (param) @variable.parameter)
+  "set" @keyword
+  (uid) @variable)
 
-; Modifiers
-(modifier) @keyword.modifier
-(exposition) @keyword.modifier
+(tactic
+  "generalize" @keyword
+  (uid) @variable)
 
-; Builtin references
-(builtin_command
-  "builtin" @keyword
-  (string) @string.special
-  (qid) @function.builtin)
+; --- Special variables — purple ---
 
-; Query types
-(assert_query
-  ["assert" "assertnot"] @keyword.function)
-(compute_query "compute" @keyword.function)
-(print_query "print" @keyword.function)
-(proofterm_query) @keyword.function
-(flag_query "flag" @keyword.function)
-(prover_query "prover" @keyword.function)
-(prover_timeout_query "prover_timeout" @keyword.function)
-(verbose_query "verbose" @keyword.function)
-(type_query "type" @keyword.function)
-(search_query "search" @keyword.function)
+"_" @variable.special
 
-; Debug operators
-(debug_query
-  ["+" "-"] @operator)
+(meta_var
+  "?" @variable.special)
 
-; Proof structure
-(proof_end) @keyword
-(proof "begin" @keyword)
-(subproof ["{" "}"] @punctuation.bracket)
+(pattern_var
+  "$" @variable.special
+  (identifier
+    (regular_id) @variable.special))
 
-; Error highlighting for incomplete constructs
-(ERROR) @error
+(pattern_var
+  "$" @variable.special
+  (identifier
+    (escaped_id) @variable.special))
+
+; --- Module paths ---
+
+; Qualified names: Stdlib.Nat → module parts yellow, final part white
+(qualified_id
+  (id_part) @string
+  "." @punctuation.delimiter
+  (id_part) @variable)
