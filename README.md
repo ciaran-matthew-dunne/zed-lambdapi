@@ -50,19 +50,22 @@ Select the cloned directory.
 
 The extension finds Lambdapi via `which lambdapi` or the `LAMBDAPI_PATH` environment variable. It resolves the library root from `OPAM_SWITCH_PREFIX` (or `LAMBDAPI_LIB_ROOT`). Make sure `eval $(opam env)` has been run in your shell before launching Zed.
 
-## Syntax Overview
+## Unicode Input
 
-Lambdapi uses Unicode operators with ASCII alternatives:
+Lambdapi makes heavy use of Unicode symbols (`→`, `λ`, `Π`, `≔`, `↪`, `∀`, `∃`, `∧`, `∨`, etc.). To input these in Zed, we use **snippets** based on the naming conventions from the [unicode-math](https://ctan.org/pkg/unicode-math) LaTeX package (see the [symbol table](http://mirrors.ctan.org/macros/unicodetex/latex/unicode-math/unimath-symbols.pdf)).
 
-| Unicode | ASCII | Meaning |
-|---------|-------|---------|
-| `→` | `->` | Arrow (function type) |
-| `λ` | `\` | Lambda abstraction |
-| `Π` | `forall` | Pi type |
-| `≔` | `:=` | Definition |
-| `↪` | `\|->` | Rewrite hook arrow |
-| `⊢` | `\|-` | Turnstile |
-| `≡` | `==` | Equivalence |
+Type a symbol name (e.g. `to`, `lambda`, `forall`, `coloneq`) and select it from the autocomplete menu to insert the corresponding Unicode character.
+
+### Setup
+
+Copy [`snippets/lambdapi.json`](snippets/lambdapi.json) to your Zed snippets directory:
+
+```bash
+mkdir -p ~/.config/zed/snippets
+cp snippets/lambdapi.json ~/.config/zed/snippets/
+```
+
+Restart Zed. The snippets will be available in all `.lp` files via autocomplete.
 
 ## Project Structure
 
