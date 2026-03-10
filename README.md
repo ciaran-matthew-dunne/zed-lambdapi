@@ -15,24 +15,32 @@
 ## Requirements
 
 - [Zed](https://zed.dev) editor
-- [Lambdapi](https://github.com/Deducteam/lambdapi) installed and on your `PATH`
-- [opam](https://opam.ocaml.org/) with an active switch (for `OPAM_SWITCH_PREFIX`)
-
-Install Lambdapi:
-```bash
-opam install lambdapi
-eval $(opam env)
-```
+- [opam](https://opam.ocaml.org/) with an active switch
 
 ## Installation
 
-### From source (dev extension)
+### 1. Install Lambdapi (custom fork)
+
+This extension requires a [custom fork](https://github.com/ciaran-matthew-dunne/lambdapi) of Lambdapi with improved LSP support (focused diagnostics, go-to-definition fixes, richer hover). If you already have Lambdapi installed, the fork will replace it in your current opam switch.
+
+```bash
+opam pin add lambdapi git+https://github.com/ciaran-matthew-dunne/lambdapi.git
+eval $(opam env)
+```
+
+To switch back to upstream Lambdapi later:
+```bash
+opam pin remove lambdapi
+opam install lambdapi
+```
+
+### 2. Install the Zed extension
 
 ```bash
 git clone https://github.com/ciaran-matthew-dunne/zed-lambdapi
 ```
 
-Then in Zed, open the command palette and run:
+In Zed, open the command palette and run:
 ```
 zed: install dev extension
 ```
