@@ -109,6 +109,12 @@ logs:
 	@echo "=== LSP log (recent) ==="
 	@tail -20 $(LSP_LOG)
 
+# --- Tools ---
+
+# Launch proof goals viewer (standalone, own LSP): make goals F=file.lp
+goals:
+	python3 tools/lp-goals "$(F)" --watch
+
 # --- LSP integration tests ---
 
 # Run LSP integration tests against test/ corpus
@@ -119,7 +125,17 @@ test-lsp:
 test-lsp-v:
 	python3 tools/test-lsp.py -v
 
-# Run all tests (grammar + LSP)
-test-all: test test-lsp
+# --- DAP integration tests ---
 
-.PHONY: all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs test-lsp test-lsp-v test-all
+# Run DAP integration tests against test/ corpus
+test-dap:
+	python3 tools/test-dap.py
+
+# Run DAP tests with verbose output
+test-dap-v:
+	python3 tools/test-dap.py -v
+
+# Run all tests (grammar + LSP + DAP)
+test-all: test test-lsp test-dap
+
+.PHONY: all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs goals test-lsp test-lsp-v test-dap test-dap-v test-all

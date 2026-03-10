@@ -6,13 +6,13 @@ authors = ["Ciarán Dunne <cciaranddunne@gmail.com>"]
 description = "Support for LambdaPi in Zed"
 repository = "https://github.com/ciaran-matthew-dunne/zed-lambdapi"
 
-# LOCAL DEVELOPMENT: Uses file:// URL to load grammar from local filesystem
-# This avoids the commit-push-reinstall cycle during development
 [grammars.lambdapi]
-repository = "file:///home/ciaran/prog/tree-sitter-lambdapi"
-rev = "73a842103b252e1e1329215192e94dbd91679a28"
+repository = "https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi"
+rev = "f40b05ca2700605bcb9a50c9deae756c65f47401"
 path = "grammars"
 
 [language_servers.lambdapi-lsp]
 name = "lambdapi-lsp"
 languages = ["LambdaPi"]
+
+[debug_adapters.lambdapi-dap]

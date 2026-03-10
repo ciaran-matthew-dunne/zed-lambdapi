@@ -25,16 +25,20 @@ import time
 # --- LSP client ---
 
 class LSPClient:
-    def __init__(self, lib_root, map_dirs=None, log_file=None):
+    def __init__(self, lib_root, map_dirs=None, log_file=None, standard_lsp=True):
         self.lib_root = lib_root
         self.map_dirs = map_dirs or []
         self.log_file = log_file
+        self.standard_lsp = standard_lsp
         self.msg_id = 0
         self.proc = None
         self.stderr_lines = []
 
     def start(self):
-        cmd = ["lambdapi", "lsp", f"--lib-root={self.lib_root}"]
+        cmd = ["lambdapi", "lsp"]
+        if self.standard_lsp:
+            cmd.append("--standard-lsp")
+        cmd.append(f"--lib-root={self.lib_root}")
         for md in self.map_dirs:
             cmd.append(f"--map-dir={md}")
         if self.log_file:
@@ -99,7 +103,12 @@ class LSPClient:
             header += b
             if header.endswith(b"\r\n\r\n"):
                 size = int(header.decode().split(":")[1].strip().split("\r")[0])
-                data = self.proc.stdout.read(size)
+                data = b""
+                while len(data) < size:
+                    chunk = self.proc.stdout.read(size - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
                 return json.loads(data.decode())
         return None
 
@@ -188,18 +197,37 @@ class TestRunner:
         self.passed = 0
         self.failed = 0
         self.failures = []
+        self.timings = []  # (name, duration_ms)
+        self._timer_start = None
+        self._timer_name = None
+
+    def start_timer(self, name):
+        self._timer_name = name
+        self._timer_start = time.monotonic()
+
+    def stop_timer(self):
+        if self._timer_start is not None:
+            dur_ms = (time.monotonic() - self._timer_start) * 1000
+            self.timings.append((self._timer_name, dur_ms))
+            self._timer_start = None
+            return dur_ms
+        return 0
 
     def ok(self, name, detail=""):
+        dur_ms = self.stop_timer()
         self.passed += 1
-        print(f"  {GREEN}✓{RESET} {name}")
+        timing = f" {DIM}({dur_ms:.0f}ms){RESET}" if dur_ms else ""
+        print(f"  {GREEN}✓{RESET} {name}{timing}")
         if self.verbose and detail:
             for line in detail.strip().split("\n"):
                 print(f"    {DIM}{line}{RESET}")
 
     def fail(self, name, reason):
+        dur_ms = self.stop_timer()
         self.failed += 1
         self.failures.append((name, reason))
-        print(f"  {RED}✗{RESET} {name}: {reason}")
+        timing = f" ({dur_ms:.0f}ms)" if dur_ms else ""
+        print(f"  {RED}✗{RESET} {name}{timing}: {reason}")
 
     def summary(self):
         total = self.passed + self.failed
@@ -211,6 +239,17 @@ class TestRunner:
             print(f"\n{RED}Failures:{RESET}")
             for name, reason in self.failures:
                 print(f"  {name}: {reason}")
+
+        # Timing summary
+        if self.timings:
+            total_ms = sum(t for _, t in self.timings)
+            print(f"\n{BOLD}Timing{RESET}")
+            for name, dur in sorted(self.timings, key=lambda x: -x[1]):
+                bar = "█" * max(1, int(dur / 100))
+                color = RED if dur > 2000 else YELLOW if dur > 500 else GREEN
+                print(f"  {color}{bar}{RESET} {name}: {dur:.0f}ms")
+            print(f"  {DIM}total: {total_ms:.0f}ms{RESET}")
+
         return self.failed == 0
 
 
@@ -306,6 +345,7 @@ def test_hover(client, runner, uri, pos, label,
         runner.fail(f"hover: {label}", "position not found in source")
         return
     line, col = pos
+    runner.start_timer(f"hover: {label}")
     resp = client.hover(uri, line, col)
     result = get_result(resp)
     if result:
@@ -333,6 +373,7 @@ def test_definition(client, runner, uri, pos, label,
         runner.fail(f"def: {label}", "position not found in source")
         return
     line, col = pos
+    runner.start_timer(f"def: {label}")
     resp = client.definition(uri, line, col)
     if not client.alive:
         runner.fail(f"def: {label}", "server crashed")
@@ -357,7 +398,7 @@ def test_definition(client, runner, uri, pos, label,
         runner.ok(f"def: {label}", "null (expected)")
 
 
-def test_diagnostics(runner, diag_items, file_label):
+def test_diagnostics(runner, diag_items, file_label, standard_lsp=True):
     errors = [d for d in diag_items if d.get("severity", 0) <= 2]
     if not errors:
         runner.ok(f"{file_label}: no errors", f"{len(diag_items)} diagnostic(s)")
@@ -365,29 +406,41 @@ def test_diagnostics(runner, diag_items, file_label):
         msgs = "; ".join(d.get("message", "?")[:60] for d in errors[:3])
         runner.fail(f"{file_label}: no errors", f"{len(errors)} error(s): {msgs}")
 
-    hints = [d for d in diag_items if d.get("severity", 0) == 4]
-    if hints:
-        too_wide = [h for h in hints
-                    if (h["range"]["end"]["character"]
-                        - h["range"]["start"]["character"]) > 30
-                    and h["range"]["start"]["line"]
-                        == h["range"]["end"]["line"]]
-        if not too_wide:
-            runner.ok(f"{file_label}: hint ranges focused",
-                      f"{len(hints)} hint(s), all focused")
+    goal_diags = [d for d in diag_items if "goal_info" in d]
+    if standard_lsp:
+        # --standard-lsp: no goal_info diagnostics expected
+        if not goal_diags:
+            runner.ok(f"{file_label}: no goal_info (standard-lsp)",
+                      f"{len(diag_items)} diagnostic(s), none with goal_info")
         else:
-            runner.fail(f"{file_label}: hint ranges focused",
-                        f"{len(too_wide)}/{len(hints)} too wide, "
-                        f"e.g. {json.dumps(too_wide[0]['range'])}")
+            runner.fail(f"{file_label}: no goal_info (standard-lsp)",
+                        f"{len(goal_diags)} unexpected goal_info diagnostic(s)")
+    else:
+        # Extended mode: check hint range widths
+        hints = [d for d in diag_items if d.get("severity", 0) == 4]
+        if hints:
+            too_wide = [h for h in hints
+                        if (h["range"]["end"]["character"]
+                            - h["range"]["start"]["character"]) > 30
+                        and h["range"]["start"]["line"]
+                            == h["range"]["end"]["line"]]
+            if not too_wide:
+                runner.ok(f"{file_label}: hint ranges focused",
+                          f"{len(hints)} hint(s), all focused")
+            else:
+                runner.fail(f"{file_label}: hint ranges focused",
+                            f"{len(too_wide)}/{len(hints)} too wide, "
+                            f"e.g. {json.dumps(too_wide[0]['range'])}")
 
 
 # --- Main test suite ---
 
-def run_tests(client, runner, test_dir, filter_pattern=None):
+def run_tests(client, runner, test_dir, filter_pattern=None, standard_lsp=True):
     root_uri = file_uri(test_dir)
 
     # Initialize
     print(f"\n{BOLD}Initialize{RESET}")
+    runner.start_timer("initialize")
     resp = client.initialize(root_uri)
     if resp and resp.get("result", {}).get("capabilities"):
         caps = resp["result"]["capabilities"]
@@ -404,13 +457,22 @@ def run_tests(client, runner, test_dir, filter_pattern=None):
         test_text = f.read()
 
     src = SourceFile(test_text)
+    runner.start_timer("didOpen + diagnostics")
     client.open_file(test_uri, test_text)
-    diags = extract_diagnostics(client.drain_notifications(timeout=10))
+    diag_raw = client.drain_notifications(timeout=10)
+    diags = extract_diagnostics(diag_raw)
+    diag_bytes = sum(len(json.dumps(d)) for d in diag_raw)
+    goal_count = sum(1 for d in diags if "goal_info" in d)
+    dur = runner.stop_timer()
+    print(f"  {DIM}didOpen + diagnostics: {dur:.0f}ms, "
+          f"{len(diags)} diags ({goal_count} with goal_info), "
+          f"{diag_bytes} bytes payload{RESET}")
 
     # Diagnostics
     if should_run("diagnostics", filter_pattern):
         print(f"\n{BOLD}Diagnostics{RESET}")
-        test_diagnostics(runner, diags, "test.lp")
+        runner.start_timer("test.lp: no errors")
+        test_diagnostics(runner, diags, "test.lp", standard_lsp=standard_lsp)
 
     # Hover
     if should_run("hover", filter_pattern):
@@ -486,6 +548,7 @@ def run_tests(client, runner, test_dir, filter_pattern=None):
     if should_run("symbols", filter_pattern):
         print(f"\n{BOLD}Document symbols{RESET}")
         if client.alive:
+            runner.start_timer("documentSymbol")
             resp = client.document_symbols(test_uri)
             result = get_result(resp)
             if result:
@@ -515,8 +578,11 @@ def main():
     parser.add_argument("-k", "--filter", help="only run tests matching pattern")
     parser.add_argument("--log-file", help="write LSP server log to file")
     parser.add_argument("--test-dir", default="test", help="test directory (default: test)")
+    parser.add_argument("--extended-lsp", action="store_true",
+                        help="use extended LSP mode (no --standard-lsp)")
     args = parser.parse_args()
 
+    standard_lsp = not args.extended_lsp
     test_dir = os.path.abspath(args.test_dir)
     log_file = args.log_file or os.path.join(test_dir, ".lsp-test.log")
 
@@ -531,18 +597,22 @@ def main():
 
     map_dirs = [f"Stdlib:{installed_lib}/Stdlib"]
 
+    lsp_mode = "extended" if not standard_lsp else "standard"
     print(f"{BOLD}Lambdapi LSP integration tests{RESET}")
     print(f"{DIM}test dir:  {test_dir}{RESET}")
     print(f"{DIM}lib root:  {test_dir}{RESET}")
     print(f"{DIM}map dirs:  {', '.join(map_dirs)}{RESET}")
+    print(f"{DIM}lsp mode:  {lsp_mode}{RESET}")
     print(f"{DIM}lsp log:   {log_file}{RESET}")
 
     runner = TestRunner(verbose=args.verbose)
-    client = LSPClient(lib_root=test_dir, map_dirs=map_dirs, log_file=log_file)
+    client = LSPClient(lib_root=test_dir, map_dirs=map_dirs, log_file=log_file,
+                       standard_lsp=standard_lsp)
     client.start()
 
     try:
-        run_tests(client, runner, test_dir, filter_pattern=args.filter)
+        run_tests(client, runner, test_dir, filter_pattern=args.filter,
+                  standard_lsp=standard_lsp)
     except Exception as e:
         print(f"\n{RED}Fatal error: {e}{RESET}")
         import traceback

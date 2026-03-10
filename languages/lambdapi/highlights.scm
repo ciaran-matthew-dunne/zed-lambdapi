@@ -7,13 +7,14 @@
 ; Zedoki palette mapping:
 ;   @keyword       — red/pink (#ff6188)  — commands, tactics, flags
 ;   @attribute     — cyan italic (#78dce8) — modifiers, notation directives
-;   @constant      — purple (#ab9df2)    — TYPE, pattern vars ($x), wildcards
+;   @constant      — purple (#ab9df2)    — TYPE
 ;   @function      — green (#a9dc76)     — symbol/definition names
 ;   @constructor   — red/pink (#ff6188)  — inductive constructors
 ;   @type          — cyan (#78dce8)      — inductive type names
 ;   @comment       — gray italic (#727072)
 ;   @string        — yellow (#ffd866)    — "..."
 ;   @variable      — white (#fcfcfa)     — identifiers
+;   @label         — orange (#fc9867)    — pattern vars ($x)
 ;   @variable.special — purple (#ab9df2) — wildcards, metavars
 ;   @punctuation   — muted gray (#939293)
 ;   @tag           — red/pink (#ff6188)  — module path prefixes
@@ -238,14 +239,14 @@
   "?" @variable.special)
 
 (pattern_var
-  "$" @variable.special
+  "$" @label
   (identifier
-    (regular_id) @variable.special))
+    (regular_id) @label))
 
 (pattern_var
-  "$" @variable.special
+  "$" @label
   (identifier
-    (escaped_id) @variable.special))
+    (escaped_id) @label))
 
 ; --- Module paths ---
 

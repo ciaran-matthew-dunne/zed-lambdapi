@@ -4,10 +4,10 @@
 // ============================================
 // Require/open (module system)
 // ============================================
-
-require open Stdlib.Set Stdlib.Prop Stdlib.Eq Stdlib.FOL;
-require open Stdlib.Bool Stdlib.List;
-require open Stdlib.Classic;
+require open
+  Stdlib.Set Stdlib.HOL Stdlib.Eq
+  Stdlib.Prop Stdlib.Bool Stdlib.Classic
+  Stdlib.Nat Stdlib.List;
 
 
 /* ============================================
@@ -30,6 +30,7 @@ private symbol internal_helper : τ nat;
 
 // Protected
 protected symbol api_sym : τ nat → τ nat;
+
 
 // Implicit arguments [...]
 symbol first [a] : τ a → τ a → τ a;
@@ -184,7 +185,7 @@ opaque symbol
   add_0_r (n : τ nat) : π (n + _0 = n) ≔
 begin
   induction
-  { reflexivity }
+  { reflexivity; }
   { assume n ih;
     simplify;
     reflexivity };
@@ -201,7 +202,8 @@ begin
 end;
 
 // refine
-opaque symbol or_comm [p q] : π (p ∨ q) → π (q ∨ p) ≔
+opaque symbol or_comm [p q] :
+  π (p ∨ q) → π (q ∨ p) ≔
 begin
   assume p q h;
   refine ∨ₑ h _ _
@@ -247,12 +249,13 @@ end;
 // ============================================
 
 // Boolean operations
-symbol my_xor (a b : 𝔹) ≔ (a or (not b)) and ((not a) or b);
+symbol my_xor (a b : 𝔹) ≔
+  (a or (not b)) and ((not a) or b);
 
 // List operations
-symbol my_list ≔ _0 ∷ (_0 +1) ∷ (_0 +1 +1) ∷ □;
+symbol my_list ≔
+  _0 ∷ (_0 +1) ∷ (_0 +1 +1) ∷ □;
 symbol my_length ≔ size my_list;
-
 // ============================================
 // Unicode operators and ASCII alternatives
 // ============================================
@@ -307,6 +310,7 @@ opaque symbol eq_double (n m : τ nat) :
 ≔ begin
   assume n m h;
   rewrite h;
+  print;
   reflexivity;
 end;
 
