@@ -4,7 +4,6 @@ path_suffixes = ["lp"]
 line_comments = ["//"]
 tab_size = 2
 hard_tabs = false
-debuggers = ["lambdapi-dap"]
 first_line_pattern = "^#![[:space:]]*lambdapi"
 
 # Define brackets for auto-closing and matching

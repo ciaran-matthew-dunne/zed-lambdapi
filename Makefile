@@ -1,6 +1,6 @@
-GRAMMAR_DIR := /home/ciaran/prog/tree-sitter-lambdapi
-GRAMMAR_SRC := $(GRAMMAR_DIR)/grammars
 EXT_DIR     := $(shell pwd)
+GRAMMAR_DIR := $(realpath $(EXT_DIR)/../tree-sitter-lambdapi)
+GRAMMAR_SRC := $(GRAMMAR_DIR)/grammars
 ZED_LOG     := $(HOME)/.local/share/zed/logs/Zed.log
 LSP_LOG     := /tmp/lambdapi_lsp_log.txt
 
@@ -13,7 +13,7 @@ all: grammar commit-grammar sync
 
 # Regenerate parser.c from grammar.js
 grammar:
-	cd $(GRAMMAR_SRC) && tree-sitter generate --abi=14
+	cd $(GRAMMAR_SRC) && tree-sitter generate --abi=15
 
 # Run tree-sitter tests
 test:
@@ -125,17 +125,7 @@ test-lsp:
 test-lsp-v:
 	python3 tools/test-lsp.py -v
 
-# --- DAP integration tests ---
+# Run all tests (grammar + LSP)
+test-all: test test-lsp
 
-# Run DAP integration tests against test/ corpus
-test-dap:
-	python3 tools/test-dap.py
-
-# Run DAP tests with verbose output
-test-dap-v:
-	python3 tools/test-dap.py -v
-
-# Run all tests (grammar + LSP + DAP)
-test-all: test test-lsp test-dap
-
-.PHONY: all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs goals test-lsp test-lsp-v test-dap test-dap-v test-all
+.PHONY: all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs goals test-lsp test-lsp-v test-all

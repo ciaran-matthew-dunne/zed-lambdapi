@@ -1,15 +1,16 @@
 use zed_extension_api::{
-    self as zed, lsp::Symbol, CodeLabel, CodeLabelSpan, DebugAdapterBinary,
-    DebugTaskDefinition, Result, StartDebuggingRequestArguments,
-    StartDebuggingRequestArgumentsRequest,
+    self as zed, lsp::Completion, lsp::Symbol, CodeLabel, CodeLabelSpan, Result,
 };
 
 struct LambdaPiExtension;
 
+/// Lambdapi binary path, --lib-root argument, and shell environment.
+type LambdapiEnv = (String, String, Vec<(String, String)>);
+
 /// Find lambdapi binary and --lib-root arg from worktree environment.
 fn find_lambdapi(
     worktree: &zed::Worktree,
-) -> std::result::Result<(String, String, Vec<(String, String)>), String> {
+) -> std::result::Result<LambdapiEnv, String> {
     let env = worktree.shell_env();
 
     let lambdapi_path = env
@@ -17,18 +18,17 @@ fn find_lambdapi(
         .find(|(k, _)| k == "LAMBDAPI_PATH")
         .map(|(_, v)| v.clone())
         .or_else(|| worktree.which("lambdapi"))
-        .ok_or_else(|| "lambdapi not found. Install with: opam install lambdapi")?;
+        .ok_or("lambdapi not found. Install with: opam install lambdapi")?;
 
     let lib_root_prefix = env
         .iter()
         .find(|(k, _)| k == "LAMBDAPI_LIB_ROOT")
         .or_else(|| env.iter().find(|(k, _)| k == "OPAM_SWITCH_PREFIX"))
         .map(|(_, v)| v.clone())
-        .ok_or_else(|| {
+        .ok_or(
             "Neither LAMBDAPI_LIB_ROOT nor OPAM_SWITCH_PREFIX set. \
-             Run: eval $(opam env)"
-                .to_string()
-        })?;
+             Run: eval $(opam env)",
+        )?;
     let lib_root = format!("--lib-root={}/lib/lambdapi/lib_root", lib_root_prefix);
 
     Ok((lambdapi_path, lib_root, env))
@@ -46,7 +46,6 @@ impl zed::Extension for LambdaPiExtension {
     ) -> Result<zed::Command> {
         let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
 
-        // Use --standard-lsp: goal info comes from DAP / print diagnostics instead
         Ok(zed::Command {
             command: lambdapi_path,
             args: vec!["lsp".to_string(), "--standard-lsp".to_string(), lib_root],
@@ -82,43 +81,49 @@ impl zed::Extension for LambdaPiExtension {
         })
     }
 
-    fn get_dap_binary(
-        &mut self,
-        _adapter_name: String,
-        config: DebugTaskDefinition,
-        _user_provided_debug_adapter_path: Option<String>,
-        worktree: &zed::Worktree,
-    ) -> std::result::Result<DebugAdapterBinary, String> {
-        let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
+    fn label_for_completion(
+        &self,
+        _language_server_id: &zed::LanguageServerId,
+        completion: Completion,
+    ) -> Option<CodeLabel> {
+        let detail = completion.detail.as_deref().unwrap_or("");
 
-        let config_json: serde_json::Value = serde_json::from_str(&config.config)
-            .map_err(|e| format!("Invalid debug config JSON: {e}"))?;
-        let program = config_json
-            .get("program")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Missing 'program' in debug config".to_string())?
-            .to_string();
-
-        Ok(DebugAdapterBinary {
-            command: Some(lambdapi_path),
-            arguments: vec!["dap".to_string(), lib_root, program],
-            envs: env,
-            cwd: Some(worktree.root_path()),
-            connection: None,
-            request_args: StartDebuggingRequestArguments {
-                configuration: config.config,
-                request: StartDebuggingRequestArgumentsRequest::Launch,
-            },
-        })
+        match completion.kind {
+            // Tactic keyword
+            Some(zed::lsp::CompletionKind::Keyword) => {
+                let code = format!("{} {}", completion.label, detail);
+                let name_len = completion.label.len();
+                Some(CodeLabel {
+                    spans: vec![
+                        CodeLabelSpan::code_range(0..name_len),
+                        CodeLabelSpan::literal(
+                            format!("  {}", detail),
+                            Some("comment".to_string()),
+                        ),
+                    ],
+                    filter_range: (0..name_len).into(),
+                    code,
+                })
+            }
+            // Symbol (Function, Constant, etc.)
+            _ => {
+                let code = format!("symbol {} : {}", completion.label, detail);
+                let prefix = "symbol ".len();
+                let name_len = completion.label.len();
+                Some(CodeLabel {
+                    spans: vec![
+                        CodeLabelSpan::literal("symbol ", Some("keyword".to_string())),
+                        CodeLabelSpan::code_range(prefix..prefix + name_len),
+                        CodeLabelSpan::literal(" : ", None),
+                        CodeLabelSpan::literal(detail, Some("type".to_string())),
+                    ],
+                    filter_range: (prefix..prefix + name_len).into(),
+                    code,
+                })
+            }
+        }
     }
 
-    fn dap_request_kind(
-        &mut self,
-        _adapter_name: String,
-        _config: serde_json::Value,
-    ) -> std::result::Result<StartDebuggingRequestArgumentsRequest, String> {
-        Ok(StartDebuggingRequestArgumentsRequest::Launch)
-    }
 }
 
 zed::register_extension!(LambdaPiExtension);

@@ -4,7 +4,7 @@ version = "0.0.1"
 schema_version = 1
 authors = ["Ciarán Dunne <cciaranddunne@gmail.com>"]
 description = "Support for LambdaPi in Zed"
-repository = "https://github.com/ciaran-matthew-dunne/zed-lambdapi"
+repository = "https://github.com/fblanqui/lambdapi"
 
 [grammars.lambdapi]
 repository = "https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi"
@@ -14,5 +14,3 @@ path = "grammars"
 [language_servers.lambdapi-lsp]
 name = "lambdapi-lsp"
 languages = ["LambdaPi"]
-
-[debug_adapters.lambdapi-dap]

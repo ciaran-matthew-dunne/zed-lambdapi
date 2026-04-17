@@ -9,8 +9,7 @@
 - **Code outline** — navigate symbols, inductive types, constructors, rules, and notations in the symbol panel
 - **Code folding** — fold proof blocks, inductive definitions, and rule groups
 - **Auto-indentation** — context-aware indentation for proofs, rules, and blocks
-- **Bracket matching** — pairs for `()`, `[]`, `{}`, `{| |}`, `/* */`, and `""`
-- **Debug adapter** — early DAP support for proof stepping
+- **Bracket matching** — pairs for `()`, `[]`, `{}`
 
 ## Requirements
 
@@ -70,7 +69,7 @@ Restart Zed. The snippets will be available in all `.lp` files via autocomplete.
 ## Project Structure
 
 ```
-src/zed-lambdapi.rs          Extension entry point (LSP, labels, DAP)
+src/zed-lambdapi.rs          Extension entry point (LSP, labels)
 extension.toml                Extension manifest
 languages/lambdapi/
   config.toml                 Language configuration
