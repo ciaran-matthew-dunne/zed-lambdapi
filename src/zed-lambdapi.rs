@@ -48,16 +48,23 @@ impl zed::Extension for LambdaPiExtension {
 
         // --rich-hover: Zed has the Lambdapi tree-sitter grammar, so it
         // renders the markdown hover cards (modifiers + full declaration)
-        // correctly. Other clients that lack a Lambdapi highlighter can
-        // omit the flag and get the upstream plain-string hover.
+        // correctly. On by default. Unset by exporting LAMBDAPI_NO_RICH_HOVER
+        // (e.g. to run an upstream lambdapi build that doesn't know the
+        // flag).
+        let rich_hover = env
+            .iter()
+            .find(|(k, _)| k == "LAMBDAPI_NO_RICH_HOVER")
+            .is_none();
+
+        let mut args = vec!["lsp".to_string(), "--standard-lsp".to_string()];
+        if rich_hover {
+            args.push("--rich-hover".to_string());
+        }
+        args.push(lib_root);
+
         Ok(zed::Command {
             command: lambdapi_path,
-            args: vec![
-                "lsp".to_string(),
-                "--standard-lsp".to_string(),
-                "--rich-hover".to_string(),
-                lib_root,
-            ],
+            args,
             env,
         })
     }
