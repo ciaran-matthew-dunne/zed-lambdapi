@@ -46,21 +46,11 @@ impl zed::Extension for LambdaPiExtension {
     ) -> Result<zed::Command> {
         let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
 
-        // --rich-hover: Zed has the Lambdapi tree-sitter grammar, so it
-        // renders the markdown hover cards (modifiers + full declaration)
-        // correctly. On by default. Unset by exporting LAMBDAPI_NO_RICH_HOVER
-        // (e.g. to run an upstream lambdapi build that doesn't know the
-        // flag).
-        let rich_hover = env
-            .iter()
-            .find(|(k, _)| k == "LAMBDAPI_NO_RICH_HOVER")
-            .is_none();
-
-        let mut args = vec!["lsp".to_string(), "--standard-lsp".to_string()];
-        if rich_hover {
-            args.push("--rich-hover".to_string());
-        }
-        args.push(lib_root);
+        let args = vec![
+            "lsp".to_string(),
+            "--standard-lsp".to_string(),
+            lib_root,
+        ];
 
         Ok(zed::Command {
             command: lambdapi_path,
@@ -103,39 +93,86 @@ impl zed::Extension for LambdaPiExtension {
         completion: Completion,
     ) -> Option<CodeLabel> {
         let detail = completion.detail.as_deref().unwrap_or("");
+        let name_len = completion.label.len();
 
         match completion.kind {
-            // Tactic keyword
+            // Tactic keyword. Detail is a one-line description, always
+            // present in the initial response.
             Some(zed::lsp::CompletionKind::Keyword) => {
-                let code = format!("{} {}", completion.label, detail);
-                let name_len = completion.label.len();
+                let code = if detail.is_empty() {
+                    completion.label.clone()
+                } else {
+                    format!("{} {}", completion.label, detail)
+                };
+                let mut spans = vec![CodeLabelSpan::code_range(0..name_len)];
+                if !detail.is_empty() {
+                    spans.push(CodeLabelSpan::literal(
+                        format!("  {}", detail),
+                        Some("comment".to_string()),
+                    ));
+                }
                 Some(CodeLabel {
-                    spans: vec![
-                        CodeLabelSpan::code_range(0..name_len),
-                        CodeLabelSpan::literal(
-                            format!("  {}", detail),
-                            Some("comment".to_string()),
-                        ),
-                    ],
+                    spans,
                     filter_range: (0..name_len).into(),
                     code,
                 })
             }
-            // Symbol (Function, Constant, etc.)
-            _ => {
-                let code = format!("symbol {} : {}", completion.label, detail);
-                let prefix = "symbol ".len();
-                let name_len = completion.label.len();
+            // Hypothesis introduced by an earlier tactic. Detail carries
+            // the type ("h: π (x = y)").
+            Some(zed::lsp::CompletionKind::Variable) => {
+                let code = if detail.is_empty() {
+                    completion.label.clone()
+                } else {
+                    format!("{} {}", completion.label, detail)
+                };
+                let mut spans = vec![CodeLabelSpan::code_range(0..name_len)];
+                if !detail.is_empty() {
+                    spans.push(CodeLabelSpan::literal(
+                        format!("  {}", detail),
+                        Some("comment".to_string()),
+                    ));
+                }
                 Some(CodeLabel {
-                    spans: vec![
-                        CodeLabelSpan::literal("symbol ", Some("keyword".to_string())),
-                        CodeLabelSpan::code_range(prefix..prefix + name_len),
-                        CodeLabelSpan::literal(" : ", None),
-                        CodeLabelSpan::literal(detail, Some("type".to_string())),
-                    ],
-                    filter_range: (prefix..prefix + name_len).into(),
+                    spans,
+                    filter_range: (0..name_len).into(),
                     code,
                 })
+            }
+            // Declared symbol. Detail is filled in lazily by
+            // [completionItem/resolve]; the initial render lands here
+            // with [detail = ""], then re-renders when resolution
+            // completes.
+            _ => {
+                let prefix = "symbol ".len();
+                if detail.is_empty() {
+                    let code = format!("symbol {}", completion.label);
+                    Some(CodeLabel {
+                        spans: vec![
+                            CodeLabelSpan::literal(
+                                "symbol ", Some("keyword".to_string())),
+                            CodeLabelSpan::code_range(
+                                prefix..prefix + name_len),
+                        ],
+                        filter_range: (prefix..prefix + name_len).into(),
+                        code,
+                    })
+                } else {
+                    let code = format!(
+                        "symbol {} : {}", completion.label, detail);
+                    Some(CodeLabel {
+                        spans: vec![
+                            CodeLabelSpan::literal(
+                                "symbol ", Some("keyword".to_string())),
+                            CodeLabelSpan::code_range(
+                                prefix..prefix + name_len),
+                            CodeLabelSpan::literal(" : ", None),
+                            CodeLabelSpan::literal(
+                                detail, Some("type".to_string())),
+                        ],
+                        filter_range: (prefix..prefix + name_len).into(),
+                        code,
+                    })
+                }
             }
         }
     }
