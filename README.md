@@ -10,6 +10,7 @@
 - **Code folding** — fold proof blocks, inductive definitions, and rule groups
 - **Auto-indentation** — context-aware indentation for proofs, rules, and blocks
 - **Bracket matching** — pairs for `()`, `[]`, `{}`
+- **Proof debugger** — line breakpoints on tactic lines, step / continue, goals + hypotheses panel, via the `lambdapi dap` Debug Adapter Protocol server
 
 ## Requirements
 
@@ -69,20 +70,40 @@ Restart Zed. The snippets will be available in all `.lp` files via autocomplete.
 ## Project Structure
 
 ```
-src/zed-lambdapi.rs          Extension entry point (LSP, labels)
-extension.toml                Extension manifest
+src/zed-lambdapi.rs              Extension entry point (LSP, labels, DAP)
+extension.toml                    Extension manifest
+debug_adapter_schemas/
+  lambdapi.json                   Schema for `.zed/debug.json` entries
 languages/lambdapi/
-  config.toml                 Language configuration
-  highlights.scm              Syntax highlighting queries
-  outline.scm                 Symbol outline queries
-  brackets.scm                Bracket matching
-  folds.scm                   Code folding
-  indents.scm                 Auto-indentation
-  locals.scm                  Scope-aware highlighting
-  tags.scm                    Symbol tags
-  injections.scm              Embedded languages
-  overrides.scm               Context-dependent settings
+  config.toml                     Language configuration
+  highlights.scm                  Syntax highlighting queries
+  outline.scm                     Symbol outline queries
+  brackets.scm                    Bracket matching
+  folds.scm                       Code folding
+  indents.scm                     Auto-indentation
+  locals.scm                      Scope-aware highlighting
+  tags.scm                        Symbol tags
+  injections.scm                  Embedded languages
+  overrides.scm                   Context-dependent settings
 ```
+
+## Debugging proofs
+
+Add a `.zed/debug.json` next to your project (an example lives in `test/.zed/debug.json`):
+
+```json
+[
+  {
+    "label": "Lambdapi: debug current file",
+    "adapter": "lambdapi",
+    "request": "launch",
+    "program": "$ZED_FILE",
+    "stopOnEntry": true
+  }
+]
+```
+
+Open a `.lp` file, click the gutter to set a breakpoint on a tactic line (inside a `begin … end` block), and pick the configuration from Zed's **Debug** panel. The debugger pauses before each tactic; the **Variables** view shows each open goal as `goal[i]: "?N: <type>"` and expanding a goal lists its hypotheses. `Step Over` advances one tactic; `Continue` runs to the next breakpoint or the end of the proof.
 
 The tree-sitter grammar lives in a [separate repository](https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi).
 

@@ -1,0 +1,16 @@
+[
+  {
+    "label": "Lambdapi: debug current file",
+    "adapter": "lambdapi",
+    "request": "launch",
+    "program": "$ZED_FILE",
+    "stopOnEntry": true
+  },
+  {
+    "label": "Lambdapi: debug test.lp",
+    "adapter": "lambdapi",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/test.lp",
+    "stopOnEntry": true
+  }
+]

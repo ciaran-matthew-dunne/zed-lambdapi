@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Lambdapi launch configuration",
+  "description": "Configuration for `lambdapi dap` (proof debugger).",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": ["launch"],
+      "default": "launch",
+      "description": "Only `launch` is supported. Lambdapi runs the type-checker in-process; there is no external proof process to attach to."
+    },
+    "program": {
+      "type": "string",
+      "description": "Path to the .lp file to type-check. Supports `$ZED_FILE` for the active editor file.",
+      "default": "$ZED_FILE"
+    },
+    "stopOnEntry": {
+      "type": "boolean",
+      "default": true,
+      "description": "Pause at the start of every proof so you can step through the tactics."
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Working directory the kernel runs in (used for `lambdapi.pkg` resolution). Defaults to the worktree root.",
+      "default": "$ZED_WORKTREE_ROOT"
+    }
+  },
+  "required": ["program"]
+}

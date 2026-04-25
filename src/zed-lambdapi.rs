@@ -1,5 +1,10 @@
 use zed_extension_api::{
-    self as zed, lsp::Completion, lsp::Symbol, CodeLabel, CodeLabelSpan, Result,
+    self as zed,
+    lsp::Completion, lsp::Symbol,
+    CodeLabel, CodeLabelSpan, Result,
+    DebugAdapterBinary, DebugConfig, DebugRequest, DebugScenario,
+    DebugTaskDefinition,
+    StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
 };
 
 struct LambdaPiExtension;
@@ -86,6 +91,70 @@ impl zed::Extension for LambdaPiExtension {
             code,
         })
     }
+
+    // --- DAP (proof debugger) ----------------------------------------
+
+    fn get_dap_binary(
+        &mut self,
+        _adapter_name: String,
+        config: DebugTaskDefinition,
+        user_provided_debug_adapter_path: Option<String>,
+        worktree: &zed::Worktree,
+    ) -> Result<DebugAdapterBinary, String> {
+        let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
+        let command = user_provided_debug_adapter_path.unwrap_or(lambdapi_path);
+        Ok(DebugAdapterBinary {
+            command: Some(command),
+            arguments: vec!["dap".to_string(), lib_root],
+            envs: env,
+            cwd: None,
+            connection: None,
+            request_args: StartDebuggingRequestArguments {
+                configuration: config.config,
+                request: StartDebuggingRequestArgumentsRequest::Launch,
+            },
+        })
+    }
+
+    fn dap_request_kind(
+        &mut self,
+        _adapter_name: String,
+        _config: serde_json::Value,
+    ) -> Result<StartDebuggingRequestArgumentsRequest, String> {
+        // Lambdapi runs the type-checker in-process; there's nothing
+        // to attach to, so every session is a launch.
+        Ok(StartDebuggingRequestArgumentsRequest::Launch)
+    }
+
+    fn dap_config_to_scenario(
+        &mut self,
+        config: DebugConfig,
+    ) -> Result<DebugScenario, String> {
+        let launch = match config.request {
+            DebugRequest::Launch(l) => l,
+            DebugRequest::Attach(_) => {
+                return Err(
+                    "lambdapi adapter only supports `launch`".to_string()
+                );
+            }
+        };
+        let stop_on_entry = config.stop_on_entry.unwrap_or(true);
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("program".into(), launch.program.into());
+        cfg.insert("stopOnEntry".into(), stop_on_entry.into());
+        if let Some(cwd) = launch.cwd {
+            cfg.insert("cwd".into(), cwd.into());
+        }
+        Ok(DebugScenario {
+            label: config.label,
+            adapter: config.adapter,
+            build: None,
+            config: serde_json::Value::Object(cfg).to_string(),
+            tcp_connection: None,
+        })
+    }
+
+    // --- LSP completion labelling ------------------------------------
 
     fn label_for_completion(
         &self,
