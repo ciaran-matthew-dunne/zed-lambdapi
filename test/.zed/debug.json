@@ -12,5 +12,13 @@
     "request": "launch",
     "program": "$ZED_WORKTREE_ROOT/test.lp",
     "stopOnEntry": true
+  },
+  {
+    "label": "Lambdapi: debug test.lp + unification trace",
+    "adapter": "lambdapi",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT/test.lp",
+    "stopOnEntry": false,
+    "debug": "u"
   }
 ]

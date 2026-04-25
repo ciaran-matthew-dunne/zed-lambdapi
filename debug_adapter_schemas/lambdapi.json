@@ -20,6 +20,11 @@
       "default": true,
       "description": "Pause at the start of every proof so you can step through the tactics."
     },
+    "debug": {
+      "type": "string",
+      "description": "Lambdapi debug-trace flags (e.g. `\"u\"` for unification, `\"iut\"` for inference + unification + tactics). Each character enables one logger; output is streamed to the Debug Console. Empty string disables debug tracing.",
+      "default": ""
+    },
     "cwd": {
       "type": "string",
       "description": "Working directory the kernel runs in (used for `lambdapi.pkg` resolution). Defaults to the worktree root.",

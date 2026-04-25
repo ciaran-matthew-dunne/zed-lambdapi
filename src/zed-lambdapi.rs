@@ -142,6 +142,8 @@ impl zed::Extension for LambdaPiExtension {
         let mut cfg = serde_json::Map::new();
         cfg.insert("program".into(), launch.program.into());
         cfg.insert("stopOnEntry".into(), stop_on_entry.into());
+        // [debug] is lambdapi-specific and not in DebugConfig; users
+        // who need it set it directly in `.zed/debug.json`.
         if let Some(cwd) = launch.cwd {
             cfg.insert("cwd".into(), cwd.into());
         }
