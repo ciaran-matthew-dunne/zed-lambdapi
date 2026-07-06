@@ -51,6 +51,11 @@ Select the cloned directory.
 
 The extension finds Lambdapi via `which lambdapi` or the `LAMBDAPI_PATH` environment variable. It resolves the library root from `OPAM_SWITCH_PREFIX` (or `LAMBDAPI_LIB_ROOT`). Make sure `eval $(opam env)` has been run in your shell before launching Zed.
 
+Two more variables control the goals bridge (see *Interactive proof
+goals* below): `LAMBDAPI_NO_BRIDGE=1` launches lambdapi directly
+without the proxy, and `LAMBDAPI_LP_GOALS=/path/to/lp-goals` uses a
+development copy of the tool instead of the embedded one.
+
 ## Unicode Input
 
 Lambdapi makes heavy use of Unicode symbols (`→`, `λ`, `Π`, `≔`, `↪`, `∀`, `∃`, `∧`, `∨`, etc.). To input these in Zed, we use **snippets** based on the naming conventions from the [unicode-math](https://ctan.org/pkg/unicode-math) LaTeX package (see the [symbol table](http://mirrors.ctan.org/macros/unicodetex/latex/unicode-math/unimath-symbols.pdf)).
@@ -74,8 +79,8 @@ Zed extensions cannot open custom panels, so the goals view lives in
 Zed's terminal instead: a persistent panel (`tools/lp-goals`) shows the
 proof state, and a keybinding sends it your cursor position.
 
-The panel hooks onto the *same* LSP session Zed uses. When `lp-goals`
-is on your `PATH`, the extension launches the language server through
+The panel hooks onto the *same* LSP session Zed uses. The extension
+embeds the `lp-goals` tool and launches the language server through
 `lp-goals bridge`, a transparent stdio proxy that also exposes a Unix
 socket. The panel attaches there, so it sees exactly what Zed sees —
 unsaved edits included — and no second lambdapi process is spawned.
@@ -85,12 +90,12 @@ session and re-checks the file on save.)
 
 ### Setup
 
-Install the tool somewhere on your `PATH`, then restart Zed (the
-bridge is picked up when the language server starts):
-
-```bash
-make install-goals        # installs to ~/.local/bin/lp-goals
-```
+There is nothing to install: the first time the language server
+starts, the extension materializes `lp-goals` into its work directory
+and links it at `~/.local/bin/lp-goals` (kept up to date across
+extension updates; a manually installed copy is never overwritten).
+Make sure `~/.local/bin` is on your `PATH`. For use outside Zed,
+`make install-goals` copies the tool there directly.
 
 Add the two tasks to `~/.config/zed/tasks.json` (or a project's
 `.zed/tasks.json`):

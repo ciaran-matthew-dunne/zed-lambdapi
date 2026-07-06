@@ -8,6 +8,12 @@ session that Zed runs: the extension launches the server through
 socket. The panel subscribes there, so it sees exactly what Zed sees —
 including unsaved buffer contents — without a second lambdapi process.
 
+This script is embedded in the extension (via include_str!) and
+materialized into the extension work dir when the language server
+starts; the bridge then symlinks itself to ~/.local/bin/lp-goals so
+the Zed tasks can invoke it. There is nothing to install by hand —
+tools/lp-goals in the repo is the source of truth.
+
 Usage:
     lp-goals serve [FILE]            Run the goals panel (persistent).
     lp-goals at FILE LINE [COL]      Send cursor position to the panel.
@@ -119,6 +125,40 @@ def uri_to_path(uri):
     if uri.startswith("file://"):
         return urllib.parse.unquote(uri[len("file://"):])
     return uri
+
+
+def ensure_on_path():
+    """Expose this script as ~/.local/bin/lp-goals.
+
+    The Zed extension embeds lp-goals and materializes it into its
+    work directory, so users never install it by hand; the bridge
+    (the first mode to run, when Zed starts the language server)
+    symlinks itself onto PATH so the `lp-goals serve` / `lp-goals at`
+    tasks can find it. A regular file (manual install) is left alone;
+    a symlink we own is retargeted when the extension updates.
+    """
+    if os.name != "posix":
+        return
+    try:
+        target = os.path.realpath(os.path.abspath(__file__))
+        bindir = os.path.expanduser("~/.local/bin")
+        link = os.path.join(bindir, "lp-goals")
+        if os.path.islink(link):
+            dest = os.readlink(link)
+            if os.path.realpath(link) == target:
+                return
+            ours = ("zed/extensions" in dest.lower()
+                    or not os.path.exists(os.path.realpath(link)))
+            if ours:
+                os.unlink(link)
+                os.symlink(target, link)
+            return
+        if os.path.exists(link):
+            return
+        os.makedirs(bindir, exist_ok=True)
+        os.symlink(target, link)
+    except OSError:
+        pass
 
 
 def find_root(path):
@@ -340,6 +380,7 @@ class Bridge:
             self.proc.terminate()
 
     def run(self):
+        ensure_on_path()
         self.proc = subprocess.Popen(
             self.server_cmd, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE)

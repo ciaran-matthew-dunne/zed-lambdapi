@@ -9,6 +9,29 @@ use zed_extension_api::{
 
 struct LambdaPiExtension;
 
+/// The lp-goals companion tool (goals panel + LSP bridge), embedded in
+/// the extension and materialized into the extension work dir when the
+/// language server starts. Single source of truth: tools/lp-goals.
+const LP_GOALS_SOURCE: &str = include_str!("../tools/lp-goals");
+
+/// Write the embedded lp-goals script into the extension work dir
+/// (which is the extension's cwd; Zed resolves the relative command
+/// path against it). Rewrites only when the content changed, e.g.
+/// after an extension update.
+fn materialize_lp_goals() -> Result<String, String> {
+    let path = "lp-goals".to_string();
+    let needs_write = match std::fs::read_to_string(&path) {
+        Ok(current) => current != LP_GOALS_SOURCE,
+        Err(_) => true,
+    };
+    if needs_write {
+        std::fs::write(&path, LP_GOALS_SOURCE)
+            .map_err(|e| format!("failed to write lp-goals: {e}"))?;
+        zed::make_file_executable(&path)?;
+    }
+    Ok(path)
+}
+
 /// Lambdapi binary path, --lib-root argument, optional --map-dir flags,
 /// and shell environment.
 type LambdapiEnv = (String, String, Vec<String>, Vec<(String, String)>);
@@ -77,19 +100,27 @@ impl zed::Extension for LambdaPiExtension {
         ];
         args.extend(map_dirs);
 
-        // When the lp-goals companion tool is installed, launch the
-        // server through its transparent LSP proxy so the terminal
-        // goals panel can attach to this very session (same document
-        // state, unsaved edits included). Set LAMBDAPI_NO_BRIDGE to
-        // launch lambdapi directly.
+        // Launch the server through the embedded lp-goals bridge, a
+        // transparent LSP proxy, so the terminal goals panel can
+        // attach to this very session (same document state, unsaved
+        // edits included). Set LAMBDAPI_NO_BRIDGE to launch lambdapi
+        // directly; set LAMBDAPI_LP_GOALS to a script path to use a
+        // development copy instead of the embedded one.
         let no_bridge = env.iter().any(|(k, _)| k == "LAMBDAPI_NO_BRIDGE");
         if !no_bridge {
-            if let Some(bridge) = worktree.which("lp-goals") {
+            let script = env
+                .iter()
+                .find(|(k, _)| k == "LAMBDAPI_LP_GOALS")
+                .map(|(_, v)| Ok(v.clone()))
+                .unwrap_or_else(materialize_lp_goals);
+            // Fail open: if the script can't be materialized, run
+            // lambdapi directly rather than breaking the LSP.
+            if let Ok(script) = script {
                 let mut bridge_args =
                     vec!["bridge".to_string(), "--".to_string(), lambdapi_path];
                 bridge_args.extend(args);
                 return Ok(zed::Command {
-                    command: bridge,
+                    command: script,
                     args: bridge_args,
                     env,
                 });
