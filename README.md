@@ -10,7 +10,7 @@
 - **Code folding** — fold proof blocks, inductive definitions, and rule groups
 - **Auto-indentation** — context-aware indentation for proofs, rules, and blocks
 - **Bracket matching** — pairs for `()`, `[]`, `{}`
-- **Interactive proof goals** — a terminal goals panel (`lp-goals`) that shows the proof state at your cursor and refreshes as you edit, like the VS Code extension's goals view
+- **Interactive proof goals** — a terminal goals panel (`lp-goals`) that follows your cursor as you type and shows the live proof state, like the VS Code extension's goals view
 - **Proof debugger** — line breakpoints on tactic lines, step / continue, goals + hypotheses panel, via the `lambdapi dap` Debug Adapter Protocol server
 
 ## Requirements
@@ -138,20 +138,28 @@ Bind a key to the cursor task in `~/.config/zed/keymap.json`:
 1. Open a `.lp` file and run the **Lambdapi: Goals Panel** task
    (`task: spawn` from the command palette). The panel opens in the
    terminal dock and type-checks the file.
-2. Put the cursor on a tactic line and press `ctrl-alt-g`. The panel
-   shows the open goals and hypotheses at that exact point: at the
-   start of the line you see the state *before* the tactic runs, and
-   at the end of the line the state *after* it.
-3. Edit the proof — Zed streams your changes to the LSP as you type
-   (no save needed), and the panel refreshes the goals at your last
-   position as soon as the file re-checks. Errors are shown at the
-   bottom of the panel; when an error precedes your cursor, goals are
-   shown at the error position instead.
+2. Just start editing the proof. In **follow mode** (on by default when
+   attached to Zed's LSP) the panel tracks where you are typing: as you
+   write each tactic, the goals update at that point — no keypress, no
+   save. It even switches files when you edit a different open `.lp`
+   buffer. Goals are shown at the exact caret: after a tactic you see
+   the resulting state; errors appear at the bottom, and when an error
+   precedes the caret the goals are shown at the error position.
+3. To inspect a spot you are *not* typing at, put the cursor there and
+   press `ctrl-alt-g` (the **Lambdapi: Goals at Cursor** task). This is
+   also the way to get goals in standalone mode, which has no caret
+   feed. Placing the caret at the start of a tactic line shows the
+   state *before* it runs; at the end of the line, *after*.
 
-The header shows the connection mode: `⇄ zed` when attached to Zed's
-LSP session, `standalone` when running its own. In standalone mode the
-panel reads the file from disk, so enable autosave for a smooth
-experience: `{ "autosave": { "after_delay": { "milliseconds": 600 } } }`.
+While the panel terminal has focus, single keys control it:
+`f` toggles follow (the header shows `follow` / `pinned`), `l` toggles
+the log tail, `q` quits.
+
+The header also shows the connection mode: `⇄ zed` when attached to
+Zed's LSP session, `standalone` when running its own. In standalone
+mode the panel reads the file from disk, so enable autosave for a
+smooth experience:
+`{ "autosave": { "after_delay": { "milliseconds": 600 } } }`.
 
 `lp-goals once FILE LINE [COL]` also works as a plain CLI, outside Zed.
 It resolves `lambdapi` the same way the extension does (`LAMBDAPI_PATH`,
