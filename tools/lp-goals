@@ -2,29 +2,36 @@
 """lp-goals — Lambdapi proof goals panel for Zed.
 
 Zed extensions cannot open custom panels, so this tool provides the
-goals view as a terminal app: run the panel in a Zed terminal, then
-bind a key to send it your cursor position.
+goals view as a terminal app. It hooks onto the *same* Lambdapi LSP
+session that Zed runs: the extension launches the server through
+`lp-goals bridge`, a transparent stdio proxy that also exposes a Unix
+socket. The panel subscribes there, so it sees exactly what Zed sees —
+including unsaved buffer contents — without a second lambdapi process.
 
 Usage:
     lp-goals serve [FILE]            Run the goals panel (persistent).
     lp-goals at FILE LINE [COL]      Send cursor position to the panel.
     lp-goals once FILE LINE [COL]    One-shot: print goals and exit.
+    lp-goals bridge -- CMD ARG...    LSP proxy (launched by Zed).
 
 LINE and COL are 1-based (as in Zed's $ZED_ROW / $ZED_COLUMN).
 
-The panel spawns its own `lambdapi lsp` session, re-checks the file
-whenever it changes on disk, and re-renders the goals at the last
-requested position. `lp-goals at` talks to the panel over a Unix
-socket and exits immediately, so it can run as an invisible Zed task.
+The panel attaches to a running bridge when it finds one, and falls
+back to spawning its own `lambdapi lsp` (re-checking the file on save)
+otherwise. `lp-goals at` talks to the panel over a second Unix socket
+and exits immediately, so it can run as an invisible Zed task.
 
-Environment (same resolution as the Zed extension):
+Environment:
     LAMBDAPI_PATH        lambdapi binary (default: `which lambdapi`)
     LAMBDAPI_LIB_ROOT    lib root prefix (default: $OPAM_SWITCH_PREFIX)
     LAMBDAPI_MAP_DIRS    comma-separated MOD:DIR --map-dir overrides
-    LP_GOALS_SOCKET      socket path override (default: per-user tmp)
+    LP_GOALS_SOCKET      panel socket override (default: per-user tmp)
+    LP_BRIDGE_SOCKET     bridge socket override
     NO_COLOR             disable ANSI colors
 """
 
+import glob
+import hashlib
 import json
 import os
 import select
@@ -34,6 +41,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 
 # --- terminal styling -------------------------------------------------
 
@@ -56,15 +64,32 @@ def rule(char="─"):
     return f"{DIM}{char * min(term_width(), 60)}{RESET}"
 
 
-# --- environment ------------------------------------------------------
+# --- paths and environment --------------------------------------------
 
-def default_socket_path():
+def runtime_dir():
+    d = os.environ.get("XDG_RUNTIME_DIR")
+    return d if d and os.path.isdir(d) else "/tmp"
+
+
+def panel_socket_path():
     if os.environ.get("LP_GOALS_SOCKET"):
         return os.environ["LP_GOALS_SOCKET"]
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime and os.path.isdir(runtime):
-        return os.path.join(runtime, "lp-goals.sock")
-    return f"/tmp/lp-goals-{os.getuid()}.sock"
+    return os.path.join(runtime_dir(), f"lp-goals-{os.getuid()}.sock")
+
+
+def bridge_socket_path(root_uri):
+    if os.environ.get("LP_BRIDGE_SOCKET"):
+        return os.environ["LP_BRIDGE_SOCKET"]
+    digest = hashlib.sha1(root_uri.encode()).hexdigest()[:10]
+    return os.path.join(runtime_dir(), f"lp-bridge-{digest}.sock")
+
+
+def bridge_socket_candidates():
+    override = os.environ.get("LP_BRIDGE_SOCKET")
+    if override:
+        return [override] if os.path.exists(override) else []
+    pattern = os.path.join(runtime_dir(), "lp-bridge-*.sock")
+    return sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
 
 
 def find_lambdapi_cmd():
@@ -90,6 +115,12 @@ def file_uri(path):
     return "file://" + os.path.abspath(path)
 
 
+def uri_to_path(uri):
+    if uri.startswith("file://"):
+        return urllib.parse.unquote(uri[len("file://"):])
+    return uri
+
+
 def find_root(path):
     """Walk up from the file looking for lambdapi.pkg; that directory
     (or the file's own directory) becomes the LSP rootUri."""
@@ -104,91 +135,23 @@ def find_root(path):
         cur = parent
 
 
-# --- LSP session ------------------------------------------------------
+# --- LSP wire format ---------------------------------------------------
 
-class LspSession:
-    """A `lambdapi lsp` subprocess with non-blocking message reads."""
+class MsgBuffer:
+    """Incremental Content-Length framed JSON-RPC parser."""
 
     def __init__(self):
-        self.proc = None
-        self.msg_id = 0
         self.buf = b""
 
-    def start(self, root_uri):
-        self.proc = subprocess.Popen(
-            find_lambdapi_cmd(),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        os.set_blocking(self.proc.stdout.fileno(), False)
-        mid = self.request("initialize", {
-            "processId": os.getpid(),
-            "rootUri": root_uri,
-            "capabilities": {},
-        })
-        # Block until the initialize response arrives.
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            for msg in self.drain(timeout=0.2):
-                if msg.get("id") == mid:
-                    self.notify("initialized", {})
-                    return
-        sys.exit("lp-goals: lambdapi lsp did not answer initialize")
+    def feed(self, data):
+        self.buf += data
 
-    def alive(self):
-        return self.proc is not None and self.proc.poll() is None
-
-    def stop(self):
-        if not self.proc:
-            return
-        try:
-            self.request("shutdown", {})
-            self.notify("exit", {})
-            self.proc.stdin.close()
-            self.proc.wait(timeout=2)
-        except Exception:
-            self.proc.kill()
-        self.proc = None
-
-    def _write(self, msg):
-        body = json.dumps(msg).encode()
-        header = f"Content-Length: {len(body)}\r\n\r\n".encode()
-        try:
-            self.proc.stdin.write(header + body)
-            self.proc.stdin.flush()
-        except BrokenPipeError:
-            pass
-
-    def request(self, method, params):
-        self.msg_id += 1
-        self._write({"jsonrpc": "2.0", "id": self.msg_id,
-                     "method": method, "params": params})
-        return self.msg_id
-
-    def notify(self, method, params):
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
-
-    def fileno(self):
-        return self.proc.stdout.fileno()
-
-    def drain(self, timeout=0.0):
-        """Read every complete message currently available."""
-        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
-        if ready:
-            try:
-                chunk = self.proc.stdout.read()
-                if chunk:
-                    self.buf += chunk
-            except (BlockingIOError, ValueError):
-                pass
-        msgs = []
+    def messages(self):
         while True:
             msg = self._parse_one()
             if msg is None:
-                break
-            msgs.append(msg)
-        return msgs
+                return
+            yield msg
 
     def _parse_one(self):
         sep = self.buf.find(b"\r\n\r\n")
@@ -212,28 +175,480 @@ class LspSession:
         except json.JSONDecodeError:
             return None
 
-    # Document sync
 
-    def open_doc(self, uri, text):
-        self.notify("textDocument/didOpen", {
-            "textDocument": {"uri": uri, "languageId": "lambdapi",
-                             "version": 1, "text": text}})
+def lsp_frame(msg):
+    body = json.dumps(msg, ensure_ascii=False).encode()
+    return f"Content-Length: {len(body)}\r\n\r\n".encode() + body
 
-    def change_doc(self, uri, text, version):
-        self.notify("textDocument/didChange", {
-            "textDocument": {"uri": uri, "version": version},
-            "contentChanges": [{"text": text}]})
 
-    def close_doc(self, uri):
-        self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+# --- bridge (LSP proxy) -------------------------------------------------
+
+# Requests panel clients are allowed to inject into the shared server.
+INJECTABLE = {"proof/goals"}
+INJECT_BASE = 1 << 30
+
+
+class Bridge:
+    """Transparent LSP stdio proxy with a Unix-socket side channel.
+
+    Forwards Zed <-> server traffic unmodified (re-framed), while:
+    - broadcasting publishDiagnostics and document open/change/close
+      events to socket clients,
+    - injecting whitelisted client requests into the server, with ids
+      remapped so they never collide with Zed's, and routing the
+      responses back to the owning client (never to Zed).
+
+    The socket layer is fail-open: any error there is swallowed so the
+    editor's LSP session is never disturbed.
+    """
+
+    def __init__(self, server_cmd):
+        self.server_cmd = server_cmd
+        self.proc = None
+        self.zed_buf = MsgBuffer()
+        self.srv_buf = MsgBuffer()
+        self.listener = None
+        self.sock_path = None
+        self.clients = []          # connected panel sockets
+        self.client_bufs = {}      # sock -> pending line buffer
+        self.root_uri = None
+        self.docs = {}             # uri -> version (open in Zed)
+        self.diags = {}            # uri -> last publishDiagnostics params
+        self.inject_id = INJECT_BASE
+        self.injected = {}         # bridged id -> (client sock, original id)
+
+    # -- socket side channel (fail-open) ---------------------------
+
+    def open_listener(self):
+        try:
+            self.sock_path = bridge_socket_path(self.root_uri)
+            if os.path.exists(self.sock_path):
+                os.unlink(self.sock_path)
+            self.listener = socket.socket(socket.AF_UNIX)
+            self.listener.bind(self.sock_path)
+            self.listener.listen(8)
+        except OSError:
+            self.listener = None
+
+    def hello(self):
+        return {"type": "hello", "root": self.root_uri,
+                "docs": self.docs, "diags": self.diags}
+
+    def send_client(self, sock, obj):
+        try:
+            sock.sendall(json.dumps(obj).encode() + b"\n")
+        except OSError:
+            self.drop_client(sock)
+
+    def broadcast(self, obj):
+        for sock in list(self.clients):
+            self.send_client(sock, obj)
+
+    def drop_client(self, sock):
+        if sock in self.clients:
+            self.clients.remove(sock)
+        self.client_bufs.pop(sock, None)
+        self.injected = {k: v for k, v in self.injected.items()
+                         if v[0] is not sock}
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def handle_client_line(self, sock, line):
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        method = req.get("method")
+        if method not in INJECTABLE:
+            self.send_client(sock, {
+                "type": "response", "id": req.get("id"),
+                "error": {"message": f"method not allowed: {method}"}})
+            return
+        self.inject_id += 1
+        self.injected[self.inject_id] = (sock, req.get("id"))
+        self.to_server({"jsonrpc": "2.0", "id": self.inject_id,
+                        "method": method, "params": req.get("params", {})})
+
+    # -- message peeking --------------------------------------------
+
+    def peek_from_zed(self, msg):
+        method = msg.get("method")
+        if method == "initialize":
+            self.root_uri = (msg.get("params", {}).get("rootUri")
+                             or file_uri(os.getcwd()))
+            self.open_listener()
+        elif method in ("textDocument/didOpen", "textDocument/didChange"):
+            td = msg.get("params", {}).get("textDocument", {})
+            uri = td.get("uri")
+            if uri:
+                self.docs[uri] = td.get("version", 0)
+                self.broadcast({"type": "doc", "method": method,
+                                "uri": uri, "version": self.docs[uri]})
+        elif method == "textDocument/didClose":
+            uri = msg.get("params", {}).get("textDocument", {}).get("uri")
+            if uri:
+                self.docs.pop(uri, None)
+                self.diags.pop(uri, None)
+                self.broadcast({"type": "doc", "method": method,
+                                "uri": uri, "version": None})
+
+    def peek_from_server(self, msg):
+        """Returns False if the message must NOT be forwarded to Zed."""
+        mid = msg.get("id")
+        if mid in self.injected:
+            sock, orig = self.injected.pop(mid)
+            reply = {"type": "response", "id": orig}
+            if "result" in msg:
+                reply["result"] = msg["result"]
+            else:
+                reply["error"] = msg.get("error",
+                                         {"message": "request failed"})
+            self.send_client(sock, reply)
+            return False
+        if msg.get("method") == "textDocument/publishDiagnostics":
+            params = msg.get("params", {})
+            uri = params.get("uri")
+            if uri:
+                self.diags[uri] = params
+            self.broadcast({"type": "notif",
+                            "method": "textDocument/publishDiagnostics",
+                            "params": params})
+        return True
+
+    # -- plumbing ----------------------------------------------------
+
+    def to_server(self, msg):
+        try:
+            self.proc.stdin.write(lsp_frame(msg))
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def to_zed(self, msg):
+        sys.stdout.buffer.write(lsp_frame(msg))
+        sys.stdout.buffer.flush()
+
+    def cleanup(self):
+        if self.sock_path:
+            try:
+                os.unlink(self.sock_path)
+            except OSError:
+                pass
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+
+    def run(self):
+        self.proc = subprocess.Popen(
+            self.server_cmd, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE)
+        zed_in = sys.stdin.buffer
+        os.set_blocking(zed_in.fileno(), False)
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        try:
+            while True:
+                fds = [zed_in, self.proc.stdout]
+                if self.listener:
+                    fds.append(self.listener)
+                fds.extend(self.clients)
+                ready, _, _ = select.select(fds, [], [], 1.0)
+
+                if zed_in in ready:
+                    data = zed_in.read()
+                    if data == b"":       # Zed hung up
+                        return
+                    if data:
+                        self.zed_buf.feed(data)
+                        for msg in self.zed_buf.messages():
+                            try:
+                                self.peek_from_zed(msg)
+                            except Exception:
+                                pass
+                            self.to_server(msg)
+
+                if self.proc.stdout in ready:
+                    data = self.proc.stdout.read()
+                    if data == b"":       # server died; Zed restarts us
+                        return
+                    if data:
+                        self.srv_buf.feed(data)
+                        for msg in self.srv_buf.messages():
+                            forward = True
+                            try:
+                                forward = self.peek_from_server(msg)
+                            except Exception:
+                                pass
+                            if forward:
+                                self.to_zed(msg)
+
+                if self.listener and self.listener in ready:
+                    try:
+                        conn, _ = self.listener.accept()
+                        conn.setblocking(False)
+                        self.clients.append(conn)
+                        self.client_bufs[conn] = b""
+                        self.send_client(conn, self.hello())
+                    except OSError:
+                        pass
+
+                for sock in [s for s in self.clients if s in ready]:
+                    try:
+                        data = sock.recv(65536)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        self.drop_client(sock)
+                        continue
+                    self.client_bufs[sock] += data
+                    while b"\n" in self.client_bufs[sock]:
+                        line, _, rest = self.client_bufs[sock].partition(b"\n")
+                        self.client_bufs[sock] = rest
+                        try:
+                            self.handle_client_line(sock, line)
+                        except Exception:
+                            pass
+        finally:
+            self.cleanup()
+
+
+# --- backends for the panel ---------------------------------------------
+#
+# Both backends deliver normalized events:
+#   ("diags", uri, diagnostics)   check finished, diagnostics published
+#   ("changed", uri)              document changed, re-check under way
+#   ("response", id, result)      answer to a goals request
+#   ("closed", uri)               document closed
+#   ("down", reason)              backend lost
+
+
+class BridgeBackend:
+    """Panel backend attached to a running `lp-goals bridge`."""
+
+    def __init__(self, sock, hello):
+        self.sock = sock
+        self.buf = b""
+        self.root = hello.get("root")
+        self.docs = dict(hello.get("docs", {}))
+        self.initial_diags = hello.get("diags", {})
+        self.next_id = 0
+
+    @classmethod
+    def connect(cls, path, want_path=None):
+        """Attach to the bridge at [path]; returns None if unusable or
+        if its workspace root does not contain [want_path]."""
+        try:
+            sock = socket.socket(socket.AF_UNIX)
+            sock.settimeout(2.0)
+            sock.connect(path)
+            buf = b""
+            while b"\n" not in buf:
+                data = sock.recv(65536)
+                if not data:
+                    raise OSError("bridge closed")
+                buf += data
+            hello = json.loads(buf.split(b"\n", 1)[0])
+            if hello.get("type") != "hello":
+                raise OSError("bad hello")
+        except (OSError, json.JSONDecodeError):
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return None
+        sock.settimeout(None)
+        sock.setblocking(False)
+        backend = cls(sock, hello)
+        backend.buf = buf.split(b"\n", 1)[1]
+        if want_path and backend.root:
+            root_path = uri_to_path(backend.root)
+            if not os.path.abspath(want_path).startswith(
+                    root_path.rstrip("/") + "/"):
+                backend.close()
+                return None
+        return backend
+
+    @classmethod
+    def discover(cls, want_path=None):
+        for path in bridge_socket_candidates():
+            backend = cls.connect(path, want_path)
+            if backend:
+                return backend
+        return None
+
+    def fds(self):
+        return [self.sock]
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def is_open(self, uri):
+        return uri in self.docs
 
     def request_goals(self, uri, line0, col0):
-        return self.request("proof/goals", {
+        self.next_id += 1
+        msg = {"id": self.next_id, "method": "proof/goals",
+               "params": {"textDocument": {"uri": uri},
+                          "position": {"line": line0, "character": col0}}}
+        try:
+            self.sock.sendall(json.dumps(msg).encode() + b"\n")
+        except OSError:
+            pass
+        return self.next_id
+
+    def drain(self):
+        try:
+            data = self.sock.recv(1 << 20)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            yield ("down", "bridge connection lost")
+            return
+        if not data:
+            yield ("down", "bridge closed (LSP restarted?)")
+            return
+        self.buf += data
+        while b"\n" in self.buf:
+            line, _, self.buf = self.buf.partition(b"\n")
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            kind = ev.get("type")
+            if kind == "notif":
+                params = ev.get("params", {})
+                yield ("diags", params.get("uri"),
+                       params.get("diagnostics", []))
+            elif kind == "doc":
+                uri = ev.get("uri")
+                if ev.get("method") == "textDocument/didClose":
+                    self.docs.pop(uri, None)
+                    yield ("closed", uri)
+                else:
+                    self.docs[uri] = ev.get("version")
+                    yield ("changed", uri)
+            elif kind == "response":
+                yield ("response", ev.get("id"),
+                       ev.get("result", {"logs": ""}))
+
+
+class LocalBackend:
+    """Panel backend that spawns its own `lambdapi lsp` and syncs the
+    tracked file from disk (fallback when no bridge is running)."""
+
+    def __init__(self, root_uri):
+        self.proc = subprocess.Popen(
+            find_lambdapi_cmd(), stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        self.msgbuf = MsgBuffer()
+        self.next_id = 0
+        self.versions = {}         # uri -> version
+        self._initialize(root_uri)
+
+    def _write(self, msg):
+        try:
+            self.proc.stdin.write(lsp_frame(msg))
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+    def _request(self, method, params):
+        self.next_id += 1
+        self._write({"jsonrpc": "2.0", "id": self.next_id,
+                     "method": method, "params": params})
+        return self.next_id
+
+    def _notify(self, method, params):
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _initialize(self, root_uri):
+        mid = self._request("initialize", {
+            "processId": os.getpid(), "rootUri": root_uri,
+            "capabilities": {}})
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            ready, _, _ = select.select([self.proc.stdout], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                data = self.proc.stdout.read()
+            except BlockingIOError:
+                continue
+            if data:
+                self.msgbuf.feed(data)
+            for msg in self.msgbuf.messages():
+                if msg.get("id") == mid:
+                    self._notify("initialized", {})
+                    return
+        sys.exit("lp-goals: lambdapi lsp did not answer initialize")
+
+    def fds(self):
+        return [self.proc.stdout]
+
+    def close(self):
+        try:
+            self._request("shutdown", {})
+            self._notify("exit", {})
+            self.proc.stdin.close()
+            self.proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            self.proc.kill()
+
+    def alive(self):
+        return self.proc.poll() is None
+
+    def is_open(self, uri):
+        return True                # we open documents ourselves
+
+    def sync_file(self, uri, text):
+        if uri in self.versions:
+            self.versions[uri] += 1
+            self._notify("textDocument/didChange", {
+                "textDocument": {"uri": uri,
+                                 "version": self.versions[uri]},
+                "contentChanges": [{"text": text}]})
+        else:
+            self.versions[uri] = 1
+            self._notify("textDocument/didOpen", {
+                "textDocument": {"uri": uri, "languageId": "lambdapi",
+                                 "version": 1, "text": text}})
+
+    def close_file(self, uri):
+        if uri in self.versions:
+            del self.versions[uri]
+            self._notify("textDocument/didClose",
+                         {"textDocument": {"uri": uri}})
+
+    def request_goals(self, uri, line0, col0):
+        return self._request("proof/goals", {
             "textDocument": {"uri": uri},
             "position": {"line": line0, "character": col0}})
 
+    def drain(self):
+        if not self.alive():
+            yield ("down", "lambdapi lsp exited")
+            return
+        try:
+            data = self.proc.stdout.read()
+            if data:
+                self.msgbuf.feed(data)
+        except (BlockingIOError, ValueError):
+            pass
+        for msg in self.msgbuf.messages():
+            if msg.get("method") == "textDocument/publishDiagnostics":
+                params = msg.get("params", {})
+                yield ("diags", params.get("uri"),
+                       params.get("diagnostics", []))
+            elif "id" in msg and ("result" in msg or "error" in msg):
+                yield ("response", msg["id"],
+                       msg.get("result", {"logs": ""}))
 
-# --- goal formatting --------------------------------------------------
+
+# --- goal formatting ----------------------------------------------------
 
 def format_goals(result, show_logs=False, clamped=False):
     """Render a proof/goals result. Returns a list of lines."""
@@ -296,39 +711,39 @@ def format_diagnostics(diags, limit=6):
     return lines
 
 
-# --- the panel (serve mode) -------------------------------------------
+# --- the panel (serve mode) ----------------------------------------------
 
 class Panel:
-    def __init__(self, sock_path, initial_file=None, show_logs=False):
+    def __init__(self, sock_path, initial_file=None, show_logs=False,
+                 standalone=False):
         self.sock_path = sock_path
         self.show_logs = show_logs
-        self.lsp = LspSession()
-        self.server = None
+        self.standalone = standalone
+        self.backend = None
+        self.bridged = False
+        self.server = None        # 'at' ping listener
         self.file = None          # absolute path of tracked file
         self.uri = None
-        self.version = 1
-        self.mtime = 0.0
+        self.mtime = 0.0          # local mode only
         self.pos = None           # (line, col) 1-based, last requested
         self.goals = None         # last proof/goals result
         self.diags = []           # last diagnostics for tracked uri
-        self.checked = False      # diagnostics received since last change
-        self.changed_at = 0.0     # when we last sent didOpen/didChange
-        self.pending = None       # in-flight proof/goals request id
-        self.stale = False        # goals need re-query
+        self.checked = False      # check completed since last change
+        self.changed_at = 0.0
+        self.pending = None       # in-flight goals request id
+        self.stale = False
         self.status = "starting"
-        if initial_file:
-            self.initial_file = os.path.abspath(initial_file)
-        else:
-            self.initial_file = None
+        self.retry_at = 0.0       # next bridge reconnect attempt
+        self.initial_file = (os.path.abspath(initial_file)
+                             if initial_file else None)
 
-    # -- socket ---------------------------------------------------
+    # -- 'at' ping socket -------------------------------------------
 
     def bind_socket(self):
         if os.path.exists(self.sock_path):
             probe = socket.socket(socket.AF_UNIX)
             try:
                 probe.connect(self.sock_path)
-                probe.close()
                 sys.exit(f"lp-goals: another panel is already running "
                          f"({self.sock_path})")
             except (ConnectionRefusedError, FileNotFoundError):
@@ -339,68 +754,118 @@ class Panel:
         self.server.bind(self.sock_path)
         self.server.listen(8)
 
-    # -- document tracking ----------------------------------------
+    # -- backend management ------------------------------------------
+
+    def attach(self):
+        """Connect to a bridge if possible, else spawn our own LSP."""
+        if not self.standalone:
+            backend = BridgeBackend.discover(self.file or self.initial_file)
+            if backend:
+                self.backend = backend
+                self.bridged = True
+                self.status = "attached to Zed's LSP"
+                return
+        if self.standalone:
+            root = find_root(self.file or self.initial_file or os.getcwd())
+            self.backend = LocalBackend(file_uri(root))
+            self.bridged = False
+            self.status = "standalone LSP session"
+            return
+        self.backend = None
+        self.status = ("waiting for Zed's Lambdapi LSP "
+                       "(open a .lp file; or use --standalone)…")
+
+    def backend_down(self, reason):
+        if self.backend:
+            self.backend.close()
+        self.backend = None
+        self.pending = None
+        self.checked = False
+        self.status = f"{reason} — reconnecting"
+        self.retry_at = time.time() + 1.0
+        self.render()
+
+    # -- document tracking --------------------------------------------
 
     def track(self, path):
-        """Point the panel at a file, opening it in the LSP session."""
         path = os.path.abspath(path)
         if path == self.file:
             return
-        if self.uri:
-            self.lsp.close_doc(self.uri)
+        old_uri = self.uri
         self.file = path
         self.uri = file_uri(path)
-        self.version = 1
-        try:
-            text = open(path).read()
-            self.mtime = os.path.getmtime(path)
-        except OSError as e:
-            self.status = f"cannot read {path}: {e}"
-            return
-        self.lsp.open_doc(self.uri, text)
-        self.checked = False
-        self.changed_at = time.time()
         self.goals = None
         self.diags = []
         self.stale = True
-        self.status = "checking…"
+        self.pending = None
+        if self.bridged and self.backend:
+            # Zed owns the document; we only read. Seed diagnostics
+            # from the bridge's cache when available.
+            cached = self.backend.initial_diags.get(self.uri)
+            if cached:
+                self.diags = cached.get("diagnostics", [])
+            self.checked = self.backend.is_open(self.uri)
+        elif self.backend:
+            if old_uri:
+                self.backend.close_file(old_uri)
+            try:
+                text = open(path).read()
+                self.mtime = os.path.getmtime(path)
+            except OSError as e:
+                self.status = f"cannot read {path}: {e}"
+                return
+            self.backend.sync_file(self.uri, text)
+            self.checked = False
+            self.changed_at = time.time()
+            self.status = "checking…"
 
-    def reload(self):
+    def reload_local(self):
         try:
             text = open(self.file).read()
         except OSError:
             return
-        self.version += 1
-        self.lsp.change_doc(self.uri, text, self.version)
+        self.backend.sync_file(self.uri, text)
         self.checked = False
         self.changed_at = time.time()
         self.stale = True
         self.status = "checking…"
         self.render()
 
-    # -- event handling -------------------------------------------
+    # -- event handling ------------------------------------------------
 
-    def handle_lsp(self, msg):
-        method = msg.get("method")
-        if method == "textDocument/publishDiagnostics":
-            params = msg.get("params", {})
-            if params.get("uri") == self.uri:
-                self.diags = params.get("diagnostics", [])
+    def handle_event(self, ev):
+        kind = ev[0]
+        if kind == "down":
+            self.backend_down(ev[1])
+        elif kind == "diags":
+            _, uri, diags = ev
+            if uri == self.uri:
+                self.diags = diags
                 self.checked = True
                 self.stale = True
-                n = len([d for d in self.diags if d.get("severity") == 1])
+                n = len([d for d in diags if d.get("severity") == 1])
                 self.status = (f"{n} error{'s' if n > 1 else ''}" if n
                                else "checked")
                 self.render()
-        elif msg.get("id") == self.pending:
-            self.pending = None
-            if "result" in msg:
-                self.goals = msg["result"]
-            else:
-                err = msg.get("error", {}).get("message", "request failed")
-                self.goals = {"logs": ""}
-                self.status = f"goals error: {err}"
-            self.render()
+        elif kind == "changed":
+            _, uri = ev
+            if uri == self.uri:
+                self.checked = False
+                self.changed_at = time.time()
+                self.stale = True
+                self.status = "checking…"
+                self.render()
+        elif kind == "closed":
+            _, uri = ev
+            if uri == self.uri:
+                self.status = "file closed in Zed"
+                self.render()
+        elif kind == "response":
+            _, rid, result = ev
+            if rid == self.pending:
+                self.pending = None
+                self.goals = result
+                self.render()
 
     def handle_client(self, data):
         try:
@@ -420,7 +885,10 @@ class Panel:
         self.render()
 
     def maybe_request_goals(self):
-        if not (self.stale and self.pos and self.uri):
+        if not (self.backend and self.stale and self.pos and self.uri):
+            return
+        if self.bridged and not self.backend.is_open(self.uri):
+            self.status = "file not open in Zed"
             return
         # Wait for the check to finish so the server's document table
         # has this uri; fall back after 10s in case no diagnostics
@@ -430,10 +898,10 @@ class Panel:
         if self.pending is not None:
             return
         line, col = self.pos
-        self.pending = self.lsp.request_goals(self.uri, line - 1, col - 1)
+        self.pending = self.backend.request_goals(self.uri, line - 1, col - 1)
         self.stale = False
 
-    # -- rendering -------------------------------------------------
+    # -- rendering -------------------------------------------------------
 
     def first_error_before_pos(self):
         """1-based line of the first error, if it precedes the last
@@ -451,9 +919,13 @@ class Panel:
         out = ["\033[2J\033[H"] if _want_color() else []
         name = os.path.basename(self.file) if self.file else "no file"
         pos = f":{self.pos[0]}:{self.pos[1]}" if self.pos else ""
+        if self.backend is None:
+            mode = "detached"
+        else:
+            mode = "⇄ zed" if self.bridged else "standalone"
         clock = time.strftime("%H:%M:%S")
-        header = f"{BOLD}λΠ {name}{pos}{RESET}  {DIM}{self.status} · {clock}{RESET}"
-        out.append(header)
+        out.append(f"{BOLD}λΠ {name}{pos}{RESET}  "
+                   f"{DIM}{self.status} · {mode} · {clock}{RESET}")
         out.append(rule("═"))
         if self.goals is not None:
             clamp = self.first_error_before_pos()
@@ -475,15 +947,13 @@ class Panel:
                 out.extend(errlines)
         print("\n".join(out), flush=True)
 
-    # -- main loop -------------------------------------------------
+    # -- main loop ---------------------------------------------------------
 
     def run(self):
         self.bind_socket()
-        first = self.initial_file
-        root = find_root(first) if first else os.getcwd()
-        self.lsp.start(file_uri(root))
-        if first:
-            self.track(first)
+        self.attach()
+        if self.initial_file:
+            self.track(self.initial_file)
             self.pos = None
         self.render()
 
@@ -492,7 +962,8 @@ class Panel:
                 os.unlink(self.sock_path)
             except OSError:
                 pass
-            self.lsp.stop()
+            if self.backend:
+                self.backend.close()
             print(f"\n{DIM}lp-goals stopped.{RESET}")
             sys.exit(0)
 
@@ -501,16 +972,26 @@ class Panel:
 
         last_poll = 0.0
         while True:
-            if not self.lsp.alive():
-                self.status = f"{RED}lambdapi lsp exited{RESET}"
-                self.render()
-                time.sleep(1)
-                cleanup()
-            fds = [self.lsp.proc.stdout, self.server]
+            if self.backend is None and time.time() >= self.retry_at:
+                self.attach()
+                if self.backend:
+                    file = self.file
+                    self.file = None    # force re-track
+                    if file:
+                        self.track(file)
+                    self.render()
+                else:
+                    self.retry_at = time.time() + 1.0
+
+            fds = [self.server]
+            if self.backend:
+                fds.extend(self.backend.fds())
             ready, _, _ = select.select(fds, [], [], 0.25)
-            if self.lsp.proc.stdout in ready:
-                for msg in self.lsp.drain():
-                    self.handle_lsp(msg)
+
+            if self.backend and any(f in ready for f in self.backend.fds()):
+                for ev in list(self.backend.drain()):
+                    self.handle_event(ev)
+
             if self.server in ready:
                 conn, _ = self.server.accept()
                 conn.settimeout(1.0)
@@ -522,20 +1003,24 @@ class Panel:
                     pass
                 finally:
                     conn.close()
+
+            # Local mode syncs the file from disk.
             now = time.time()
-            if self.file and now - last_poll > 0.3:
+            if (self.backend and not self.bridged and self.file
+                    and now - last_poll > 0.3):
                 last_poll = now
                 try:
                     mtime = os.path.getmtime(self.file)
                     if mtime != self.mtime:
                         self.mtime = mtime
-                        self.reload()
+                        self.reload_local()
                 except OSError:
                     pass
+
             self.maybe_request_goals()
 
 
-# --- client + one-shot modes ------------------------------------------
+# --- client + one-shot modes ----------------------------------------------
 
 def send_position(sock_path, path, line, col):
     msg = json.dumps({"file": os.path.abspath(path),
@@ -554,28 +1039,29 @@ def send_position(sock_path, path, line, col):
 def run_once(path, line, col, show_logs=False):
     path = os.path.abspath(path)
     uri = file_uri(path)
-    lsp = LspSession()
-    lsp.start(file_uri(find_root(path)))
+    backend = LocalBackend(file_uri(find_root(path)))
     try:
-        lsp.open_doc(uri, open(path).read())
+        backend.sync_file(uri, open(path).read())
         diags, checked = [], False
         deadline = time.time() + 60
         while time.time() < deadline and not checked:
-            for msg in lsp.drain(timeout=0.5):
-                if (msg.get("method") == "textDocument/publishDiagnostics"
-                        and msg.get("params", {}).get("uri") == uri):
-                    diags = msg["params"].get("diagnostics", [])
+            select.select(backend.fds(), [], [], 0.5)
+            for ev in backend.drain():
+                if ev[0] == "diags" and ev[1] == uri:
+                    diags = ev[2]
                     checked = True
+                elif ev[0] == "down":
+                    sys.exit("lp-goals: lambdapi lsp exited")
         if not checked:
             sys.exit("lp-goals: timed out waiting for lambdapi to check "
                      + path)
-        mid = lsp.request_goals(uri, line - 1, col - 1)
+        mid = backend.request_goals(uri, line - 1, col - 1)
         deadline = time.time() + 15
         while time.time() < deadline:
-            for msg in lsp.drain(timeout=0.5):
-                if msg.get("id") == mid:
-                    result = msg.get("result", {})
-                    print("\n".join(format_goals(result, show_logs)))
+            select.select(backend.fds(), [], [], 0.5)
+            for ev in backend.drain():
+                if ev[0] == "response" and ev[1] == mid:
+                    print("\n".join(format_goals(ev[2], show_logs)))
                     errs = format_diagnostics(diags)
                     if errs:
                         print()
@@ -583,10 +1069,10 @@ def run_once(path, line, col, show_logs=False):
                     return
         sys.exit("lp-goals: timed out waiting for goals")
     finally:
-        lsp.stop()
+        backend.close()
 
 
-# --- entry point -------------------------------------------------------
+# --- entry point ------------------------------------------------------------
 
 def parse_pos(args, what):
     if not args:
@@ -600,18 +1086,30 @@ def parse_pos(args, what):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if a not in ("-h", "--help")]
-    if len(args) != len(sys.argv) - 1 or not args:
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip())
         sys.exit(0)
 
-    show_logs = "--logs" in args
-    args = [a for a in args if a != "--logs"]
+    if argv[0] == "bridge":
+        rest = argv[1:]
+        if rest and rest[0] == "--":
+            rest = rest[1:]
+        if not rest:
+            sys.exit("lp-goals: bridge requires the server command, "
+                     "e.g. lp-goals bridge -- lambdapi lsp")
+        Bridge(rest).run()
+        return
+
+    show_logs = "--logs" in argv
+    standalone = "--standalone" in argv
+    args = [a for a in argv if a not in ("--logs", "--standalone")]
     cmd, rest = args[0], args[1:]
-    sock = default_socket_path()
+    sock = panel_socket_path()
 
     if cmd == "serve":
-        Panel(sock, rest[0] if rest else None, show_logs).run()
+        Panel(sock, rest[0] if rest else None, show_logs,
+              standalone=standalone).run()
     elif cmd == "at":
         if not rest:
             sys.exit("lp-goals: at requires FILE LINE [COL]")

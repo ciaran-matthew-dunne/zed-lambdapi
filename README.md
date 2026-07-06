@@ -71,12 +71,22 @@ Restart Zed. The snippets will be available in all `.lp` files via autocomplete.
 ## Interactive proof goals
 
 Zed extensions cannot open custom panels, so the goals view lives in
-Zed's terminal instead: a persistent panel (`tools/lp-goals`) runs the
-Lambdapi LSP, and a keybinding sends it your cursor position.
+Zed's terminal instead: a persistent panel (`tools/lp-goals`) shows the
+proof state, and a keybinding sends it your cursor position.
+
+The panel hooks onto the *same* LSP session Zed uses. When `lp-goals`
+is on your `PATH`, the extension launches the language server through
+`lp-goals bridge`, a transparent stdio proxy that also exposes a Unix
+socket. The panel attaches there, so it sees exactly what Zed sees —
+unsaved edits included — and no second lambdapi process is spawned.
+(Set `LAMBDAPI_NO_BRIDGE=1` to launch lambdapi directly; the panel then
+still works via `lp-goals serve --standalone`, which runs its own LSP
+session and re-checks the file on save.)
 
 ### Setup
 
-Install the tool somewhere on your `PATH`:
+Install the tool somewhere on your `PATH`, then restart Zed (the
+bridge is picked up when the language server starts):
 
 ```bash
 make install-goals        # installs to ~/.local/bin/lp-goals
@@ -127,19 +137,16 @@ Bind a key to the cursor task in `~/.config/zed/keymap.json`:
    shows the open goals and hypotheses at that exact point: at the
    start of the line you see the state *before* the tactic runs, and
    at the end of the line the state *after* it.
-3. Edit the proof and save — the panel re-checks the file and refreshes
-   the goals at your last position automatically. Errors are shown at
-   the bottom of the panel.
+3. Edit the proof — Zed streams your changes to the LSP as you type
+   (no save needed), and the panel refreshes the goals at your last
+   position as soon as the file re-checks. Errors are shown at the
+   bottom of the panel; when an error precedes your cursor, goals are
+   shown at the error position instead.
 
-For a hands-free experience enable autosave in `settings.json`, so the
-panel refreshes shortly after you stop typing:
-
-```json
-{ "autosave": { "after_delay": { "milliseconds": 600 } } }
-```
-
-The panel reads the file from disk, so unsaved edits are invisible to
-it until autosave (or `ctrl-s`) kicks in.
+The header shows the connection mode: `⇄ zed` when attached to Zed's
+LSP session, `standalone` when running its own. In standalone mode the
+panel reads the file from disk, so enable autosave for a smooth
+experience: `{ "autosave": { "after_delay": { "milliseconds": 600 } } }`.
 
 `lp-goals once FILE LINE [COL]` also works as a plain CLI, outside Zed.
 It resolves `lambdapi` the same way the extension does (`LAMBDAPI_PATH`,
@@ -150,7 +157,7 @@ It resolves `lambdapi` the same way the extension does (`LAMBDAPI_PATH`,
 ```
 src/zed-lambdapi.rs              Extension entry point (LSP, labels, DAP)
 extension.toml                    Extension manifest
-tools/lp-goals                    Terminal proof goals panel
+tools/lp-goals                    Goals panel + LSP bridge
 debug_adapter_schemas/
   lambdapi.json                   Schema for `.zed/debug.json` entries
 languages/lambdapi/

@@ -9,10 +9,17 @@ use zed_extension_api::{
 
 struct LambdaPiExtension;
 
-/// Lambdapi binary path, --lib-root argument, and shell environment.
-type LambdapiEnv = (String, String, Vec<(String, String)>);
+/// Lambdapi binary path, --lib-root argument, optional --map-dir flags,
+/// and shell environment.
+type LambdapiEnv = (String, String, Vec<String>, Vec<(String, String)>);
 
-/// Find lambdapi binary and --lib-root arg from worktree environment.
+/// Find lambdapi binary, --lib-root arg, and any --map-dir overrides
+/// from worktree environment.
+///
+/// Set `LAMBDAPI_MAP_DIRS` in the worktree shell env to override
+/// installed packages with in-tree paths.  Format is one or more
+/// `MOD:DIR` entries separated by commas:
+///   `LAMBDAPI_MAP_DIRS=pp2lp:/path/to/lp,foo:/path/to/foo`
 fn find_lambdapi(
     worktree: &zed::Worktree,
 ) -> std::result::Result<LambdapiEnv, String> {
@@ -36,7 +43,19 @@ fn find_lambdapi(
         )?;
     let lib_root = format!("--lib-root={}/lib/lambdapi/lib_root", lib_root_prefix);
 
-    Ok((lambdapi_path, lib_root, env))
+    let map_dirs: Vec<String> = env
+        .iter()
+        .find(|(k, _)| k == "LAMBDAPI_MAP_DIRS")
+        .map(|(_, v)| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("--map-dir={}", s))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok((lambdapi_path, lib_root, map_dirs, env))
 }
 
 impl zed::Extension for LambdaPiExtension {
@@ -49,13 +68,33 @@ impl zed::Extension for LambdaPiExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
+        let (lambdapi_path, lib_root, map_dirs, env) = find_lambdapi(worktree)?;
 
-        let args = vec![
+        let mut args = vec![
             "lsp".to_string(),
             "--standard-lsp".to_string(),
             lib_root,
         ];
+        args.extend(map_dirs);
+
+        // When the lp-goals companion tool is installed, launch the
+        // server through its transparent LSP proxy so the terminal
+        // goals panel can attach to this very session (same document
+        // state, unsaved edits included). Set LAMBDAPI_NO_BRIDGE to
+        // launch lambdapi directly.
+        let no_bridge = env.iter().any(|(k, _)| k == "LAMBDAPI_NO_BRIDGE");
+        if !no_bridge {
+            if let Some(bridge) = worktree.which("lp-goals") {
+                let mut bridge_args =
+                    vec!["bridge".to_string(), "--".to_string(), lambdapi_path];
+                bridge_args.extend(args);
+                return Ok(zed::Command {
+                    command: bridge,
+                    args: bridge_args,
+                    env,
+                });
+            }
+        }
 
         Ok(zed::Command {
             command: lambdapi_path,
@@ -101,11 +140,13 @@ impl zed::Extension for LambdaPiExtension {
         user_provided_debug_adapter_path: Option<String>,
         worktree: &zed::Worktree,
     ) -> Result<DebugAdapterBinary, String> {
-        let (lambdapi_path, lib_root, env) = find_lambdapi(worktree)?;
+        let (lambdapi_path, lib_root, map_dirs, env) = find_lambdapi(worktree)?;
         let command = user_provided_debug_adapter_path.unwrap_or(lambdapi_path);
+        let mut arguments = vec!["dap".to_string(), lib_root];
+        arguments.extend(map_dirs);
         Ok(DebugAdapterBinary {
             command: Some(command),
-            arguments: vec!["dap".to_string(), lib_root],
+            arguments,
             envs: env,
             cwd: None,
             connection: None,
