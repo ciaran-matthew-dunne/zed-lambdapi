@@ -1,0 +1,25 @@
+[
+  {
+    "label": "Lambdapi: Check File",
+    "command": "lambdapi",
+    "args": ["check", "$ZED_FILE"],
+    "tags": ["lambdapi-check"],
+    "reveal": "always",
+    "hide": "on_success"
+  },
+  {
+    "label": "Lambdapi: Goals Panel",
+    "command": "$ZED_WORKTREE_ROOT/tools/lp-goals",
+    "args": ["serve", "$ZED_FILE"],
+    "reveal": "always",
+    "hide": "never",
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "Lambdapi: Goals at Cursor",
+    "command": "$ZED_WORKTREE_ROOT/tools/lp-goals",
+    "args": ["at", "$ZED_FILE", "$ZED_ROW", "$ZED_COLUMN"],
+    "reveal": "never",
+    "hide": "always"
+  }
+]

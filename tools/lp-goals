@@ -1,0 +1,631 @@
+#!/usr/bin/env python3
+"""lp-goals — Lambdapi proof goals panel for Zed.
+
+Zed extensions cannot open custom panels, so this tool provides the
+goals view as a terminal app: run the panel in a Zed terminal, then
+bind a key to send it your cursor position.
+
+Usage:
+    lp-goals serve [FILE]            Run the goals panel (persistent).
+    lp-goals at FILE LINE [COL]      Send cursor position to the panel.
+    lp-goals once FILE LINE [COL]    One-shot: print goals and exit.
+
+LINE and COL are 1-based (as in Zed's $ZED_ROW / $ZED_COLUMN).
+
+The panel spawns its own `lambdapi lsp` session, re-checks the file
+whenever it changes on disk, and re-renders the goals at the last
+requested position. `lp-goals at` talks to the panel over a Unix
+socket and exits immediately, so it can run as an invisible Zed task.
+
+Environment (same resolution as the Zed extension):
+    LAMBDAPI_PATH        lambdapi binary (default: `which lambdapi`)
+    LAMBDAPI_LIB_ROOT    lib root prefix (default: $OPAM_SWITCH_PREFIX)
+    LAMBDAPI_MAP_DIRS    comma-separated MOD:DIR --map-dir overrides
+    LP_GOALS_SOCKET      socket path override (default: per-user tmp)
+    NO_COLOR             disable ANSI colors
+"""
+
+import json
+import os
+import select
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+# --- terminal styling -------------------------------------------------
+
+def _want_color():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+if _want_color():
+    BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+    CYAN, GREEN, YELLOW, RED, MAGENTA = (
+        "\033[36m", "\033[32m", "\033[33m", "\033[31m", "\033[35m")
+else:
+    BOLD = DIM = RESET = CYAN = GREEN = YELLOW = RED = MAGENTA = ""
+
+
+def term_width():
+    return shutil.get_terminal_size((80, 24)).columns
+
+
+def rule(char="─"):
+    return f"{DIM}{char * min(term_width(), 60)}{RESET}"
+
+
+# --- environment ------------------------------------------------------
+
+def default_socket_path():
+    if os.environ.get("LP_GOALS_SOCKET"):
+        return os.environ["LP_GOALS_SOCKET"]
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isdir(runtime):
+        return os.path.join(runtime, "lp-goals.sock")
+    return f"/tmp/lp-goals-{os.getuid()}.sock"
+
+
+def find_lambdapi_cmd():
+    """Build the `lambdapi lsp` command, mirroring the Zed extension."""
+    binary = os.environ.get("LAMBDAPI_PATH") or shutil.which("lambdapi")
+    if not binary:
+        sys.exit("lp-goals: lambdapi not found. "
+                 "Install with `opam install lambdapi` or set LAMBDAPI_PATH.")
+    cmd = [binary, "lsp"]
+    prefix = (os.environ.get("LAMBDAPI_LIB_ROOT")
+              or os.environ.get("OPAM_SWITCH_PREFIX"))
+    if prefix:
+        cmd.append(f"--lib-root={prefix}/lib/lambdapi/lib_root")
+    map_dirs = os.environ.get("LAMBDAPI_MAP_DIRS", "")
+    for entry in map_dirs.split(","):
+        entry = entry.strip()
+        if entry:
+            cmd.append(f"--map-dir={entry}")
+    return cmd
+
+
+def file_uri(path):
+    return "file://" + os.path.abspath(path)
+
+
+def find_root(path):
+    """Walk up from the file looking for lambdapi.pkg; that directory
+    (or the file's own directory) becomes the LSP rootUri."""
+    d = os.path.dirname(os.path.abspath(path))
+    cur = d
+    while True:
+        if os.path.isfile(os.path.join(cur, "lambdapi.pkg")):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return d
+        cur = parent
+
+
+# --- LSP session ------------------------------------------------------
+
+class LspSession:
+    """A `lambdapi lsp` subprocess with non-blocking message reads."""
+
+    def __init__(self):
+        self.proc = None
+        self.msg_id = 0
+        self.buf = b""
+
+    def start(self, root_uri):
+        self.proc = subprocess.Popen(
+            find_lambdapi_cmd(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        os.set_blocking(self.proc.stdout.fileno(), False)
+        mid = self.request("initialize", {
+            "processId": os.getpid(),
+            "rootUri": root_uri,
+            "capabilities": {},
+        })
+        # Block until the initialize response arrives.
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            for msg in self.drain(timeout=0.2):
+                if msg.get("id") == mid:
+                    self.notify("initialized", {})
+                    return
+        sys.exit("lp-goals: lambdapi lsp did not answer initialize")
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        if not self.proc:
+            return
+        try:
+            self.request("shutdown", {})
+            self.notify("exit", {})
+            self.proc.stdin.close()
+            self.proc.wait(timeout=2)
+        except Exception:
+            self.proc.kill()
+        self.proc = None
+
+    def _write(self, msg):
+        body = json.dumps(msg).encode()
+        header = f"Content-Length: {len(body)}\r\n\r\n".encode()
+        try:
+            self.proc.stdin.write(header + body)
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            pass
+
+    def request(self, method, params):
+        self.msg_id += 1
+        self._write({"jsonrpc": "2.0", "id": self.msg_id,
+                     "method": method, "params": params})
+        return self.msg_id
+
+    def notify(self, method, params):
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def fileno(self):
+        return self.proc.stdout.fileno()
+
+    def drain(self, timeout=0.0):
+        """Read every complete message currently available."""
+        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if ready:
+            try:
+                chunk = self.proc.stdout.read()
+                if chunk:
+                    self.buf += chunk
+            except (BlockingIOError, ValueError):
+                pass
+        msgs = []
+        while True:
+            msg = self._parse_one()
+            if msg is None:
+                break
+            msgs.append(msg)
+        return msgs
+
+    def _parse_one(self):
+        sep = self.buf.find(b"\r\n\r\n")
+        if sep < 0:
+            return None
+        length = None
+        for line in self.buf[:sep].split(b"\r\n"):
+            key, _, val = line.partition(b":")
+            if key.strip().lower() == b"content-length":
+                length = int(val.strip())
+        if length is None:
+            self.buf = self.buf[sep + 4:]
+            return None
+        start = sep + 4
+        if len(self.buf) < start + length:
+            return None
+        body = self.buf[start:start + length]
+        self.buf = self.buf[start + length:]
+        try:
+            return json.loads(body.decode())
+        except json.JSONDecodeError:
+            return None
+
+    # Document sync
+
+    def open_doc(self, uri, text):
+        self.notify("textDocument/didOpen", {
+            "textDocument": {"uri": uri, "languageId": "lambdapi",
+                             "version": 1, "text": text}})
+
+    def change_doc(self, uri, text, version):
+        self.notify("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": version},
+            "contentChanges": [{"text": text}]})
+
+    def close_doc(self, uri):
+        self.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+    def request_goals(self, uri, line0, col0):
+        return self.request("proof/goals", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line0, "character": col0}})
+
+
+# --- goal formatting --------------------------------------------------
+
+def format_goals(result, show_logs=False, clamped=False):
+    """Render a proof/goals result. Returns a list of lines."""
+    lines = []
+    goals = result.get("goals")
+    if goals is None:
+        lines.append(f"{DIM}Not inside a proof.{RESET}")
+    elif not goals:
+        if clamped:
+            lines.append(f"{DIM}No goal information at the error point.{RESET}")
+        else:
+            lines.append(f"{GREEN}✓ No goals remaining.{RESET}")
+    else:
+        n = len(goals)
+        for i, goal in enumerate(goals):
+            kind = goal.get("typeofgoal", "?")
+            hyps = goal.get("hyps", [])
+            if kind == "Typ":
+                gid = goal.get("gid", "?")
+                head = (f"{BOLD}{CYAN}Goal {i + 1} of {n}{RESET} "
+                        f"{DIM}({gid}){RESET}")
+            else:
+                head = f"{BOLD}{MAGENTA}Unification goal {i + 1} of {n}{RESET}"
+            lines.append(head)
+            if hyps:
+                width = max(len(h["hname"]) for h in hyps)
+                for h in hyps:
+                    # htype carries its own separator: ": ty" or "≔ def"
+                    lines.append(f"  {GREEN}{h['hname']:<{width}}{RESET} "
+                                 f"{h['htype'].strip()}")
+            lines.append(rule())
+            body = goal.get("type") if kind == "Typ" else goal.get("constr")
+            lines.append(f"  {BOLD}⊢ {body}{RESET}")
+            if i < n - 1:
+                lines.append("")
+    logs = result.get("logs", "")
+    if show_logs and logs.strip():
+        lines.append("")
+        lines.append(f"{DIM}── logs {'─' * 20}{RESET}")
+        tail = logs.strip().splitlines()[-12:]
+        lines.extend(f"{DIM}{ln}{RESET}" for ln in tail)
+    return lines
+
+
+def format_diagnostics(diags, limit=6):
+    """Render diagnostics (errors and warnings only)."""
+    lines = []
+    bad = [d for d in diags if d.get("severity", 4) <= 2]
+    for d in bad[:limit]:
+        sev = d.get("severity", 1)
+        color = RED if sev == 1 else YELLOW
+        pos = d.get("range", {}).get("start", {})
+        line = pos.get("line", 0) + 1
+        msg = " ".join(d.get("message", "").split())
+        if len(msg) > 400:
+            msg = msg[:400] + "…"
+        lines.append(f"{color}✗ L{line}:{RESET} {msg}")
+    if len(bad) > limit:
+        lines.append(f"{DIM}… and {len(bad) - limit} more{RESET}")
+    return lines
+
+
+# --- the panel (serve mode) -------------------------------------------
+
+class Panel:
+    def __init__(self, sock_path, initial_file=None, show_logs=False):
+        self.sock_path = sock_path
+        self.show_logs = show_logs
+        self.lsp = LspSession()
+        self.server = None
+        self.file = None          # absolute path of tracked file
+        self.uri = None
+        self.version = 1
+        self.mtime = 0.0
+        self.pos = None           # (line, col) 1-based, last requested
+        self.goals = None         # last proof/goals result
+        self.diags = []           # last diagnostics for tracked uri
+        self.checked = False      # diagnostics received since last change
+        self.changed_at = 0.0     # when we last sent didOpen/didChange
+        self.pending = None       # in-flight proof/goals request id
+        self.stale = False        # goals need re-query
+        self.status = "starting"
+        if initial_file:
+            self.initial_file = os.path.abspath(initial_file)
+        else:
+            self.initial_file = None
+
+    # -- socket ---------------------------------------------------
+
+    def bind_socket(self):
+        if os.path.exists(self.sock_path):
+            probe = socket.socket(socket.AF_UNIX)
+            try:
+                probe.connect(self.sock_path)
+                probe.close()
+                sys.exit(f"lp-goals: another panel is already running "
+                         f"({self.sock_path})")
+            except (ConnectionRefusedError, FileNotFoundError):
+                os.unlink(self.sock_path)   # stale socket
+            finally:
+                probe.close()
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(self.sock_path)
+        self.server.listen(8)
+
+    # -- document tracking ----------------------------------------
+
+    def track(self, path):
+        """Point the panel at a file, opening it in the LSP session."""
+        path = os.path.abspath(path)
+        if path == self.file:
+            return
+        if self.uri:
+            self.lsp.close_doc(self.uri)
+        self.file = path
+        self.uri = file_uri(path)
+        self.version = 1
+        try:
+            text = open(path).read()
+            self.mtime = os.path.getmtime(path)
+        except OSError as e:
+            self.status = f"cannot read {path}: {e}"
+            return
+        self.lsp.open_doc(self.uri, text)
+        self.checked = False
+        self.changed_at = time.time()
+        self.goals = None
+        self.diags = []
+        self.stale = True
+        self.status = "checking…"
+
+    def reload(self):
+        try:
+            text = open(self.file).read()
+        except OSError:
+            return
+        self.version += 1
+        self.lsp.change_doc(self.uri, text, self.version)
+        self.checked = False
+        self.changed_at = time.time()
+        self.stale = True
+        self.status = "checking…"
+        self.render()
+
+    # -- event handling -------------------------------------------
+
+    def handle_lsp(self, msg):
+        method = msg.get("method")
+        if method == "textDocument/publishDiagnostics":
+            params = msg.get("params", {})
+            if params.get("uri") == self.uri:
+                self.diags = params.get("diagnostics", [])
+                self.checked = True
+                self.stale = True
+                n = len([d for d in self.diags if d.get("severity") == 1])
+                self.status = (f"{n} error{'s' if n > 1 else ''}" if n
+                               else "checked")
+                self.render()
+        elif msg.get("id") == self.pending:
+            self.pending = None
+            if "result" in msg:
+                self.goals = msg["result"]
+            else:
+                err = msg.get("error", {}).get("message", "request failed")
+                self.goals = {"logs": ""}
+                self.status = f"goals error: {err}"
+            self.render()
+
+    def handle_client(self, data):
+        try:
+            req = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        path = req.get("file")
+        line = req.get("line")
+        col = req.get("col", 1)
+        if not path or not isinstance(line, int):
+            return
+        if not path.endswith(".lp"):
+            return
+        self.track(path)
+        self.pos = (line, max(1, col if isinstance(col, int) else 1))
+        self.stale = True
+        self.render()
+
+    def maybe_request_goals(self):
+        if not (self.stale and self.pos and self.uri):
+            return
+        # Wait for the check to finish so the server's document table
+        # has this uri; fall back after 10s in case no diagnostics
+        # notification ever arrives.
+        if not self.checked and time.time() - self.changed_at < 10:
+            return
+        if self.pending is not None:
+            return
+        line, col = self.pos
+        self.pending = self.lsp.request_goals(self.uri, line - 1, col - 1)
+        self.stale = False
+
+    # -- rendering -------------------------------------------------
+
+    def first_error_before_pos(self):
+        """1-based line of the first error, if it precedes the last
+        requested position (the server clamps goals to it)."""
+        if not self.pos:
+            return None
+        err_lines = [d["range"]["start"]["line"] + 1 for d in self.diags
+                     if d.get("severity") == 1 and "range" in d]
+        if not err_lines:
+            return None
+        first = min(err_lines)
+        return first if first <= self.pos[0] else None
+
+    def render(self):
+        out = ["\033[2J\033[H"] if _want_color() else []
+        name = os.path.basename(self.file) if self.file else "no file"
+        pos = f":{self.pos[0]}:{self.pos[1]}" if self.pos else ""
+        clock = time.strftime("%H:%M:%S")
+        header = f"{BOLD}λΠ {name}{pos}{RESET}  {DIM}{self.status} · {clock}{RESET}"
+        out.append(header)
+        out.append(rule("═"))
+        if self.goals is not None:
+            clamp = self.first_error_before_pos()
+            out.extend(format_goals(self.goals, self.show_logs,
+                                    clamped=clamp is not None))
+            if clamp is not None:
+                out.append(f"{DIM}(goals shown at the first error, "
+                           f"line {clamp}){RESET}")
+        elif self.pos is None:
+            out.append(f"{DIM}Waiting for a position — run the "
+                       f"“Lambdapi: Goals at Cursor” task in Zed.{RESET}")
+        else:
+            out.append(f"{DIM}…{RESET}")
+        if self.diags:
+            errlines = format_diagnostics(self.diags)
+            if errlines:
+                out.append("")
+                out.append(rule())
+                out.extend(errlines)
+        print("\n".join(out), flush=True)
+
+    # -- main loop -------------------------------------------------
+
+    def run(self):
+        self.bind_socket()
+        first = self.initial_file
+        root = find_root(first) if first else os.getcwd()
+        self.lsp.start(file_uri(root))
+        if first:
+            self.track(first)
+            self.pos = None
+        self.render()
+
+        def cleanup(*_):
+            try:
+                os.unlink(self.sock_path)
+            except OSError:
+                pass
+            self.lsp.stop()
+            print(f"\n{DIM}lp-goals stopped.{RESET}")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, cleanup)
+        signal.signal(signal.SIGTERM, cleanup)
+
+        last_poll = 0.0
+        while True:
+            if not self.lsp.alive():
+                self.status = f"{RED}lambdapi lsp exited{RESET}"
+                self.render()
+                time.sleep(1)
+                cleanup()
+            fds = [self.lsp.proc.stdout, self.server]
+            ready, _, _ = select.select(fds, [], [], 0.25)
+            if self.lsp.proc.stdout in ready:
+                for msg in self.lsp.drain():
+                    self.handle_lsp(msg)
+            if self.server in ready:
+                conn, _ = self.server.accept()
+                conn.settimeout(1.0)
+                try:
+                    data = conn.recv(65536)
+                    if data:
+                        self.handle_client(data.decode())
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
+            now = time.time()
+            if self.file and now - last_poll > 0.3:
+                last_poll = now
+                try:
+                    mtime = os.path.getmtime(self.file)
+                    if mtime != self.mtime:
+                        self.mtime = mtime
+                        self.reload()
+                except OSError:
+                    pass
+            self.maybe_request_goals()
+
+
+# --- client + one-shot modes ------------------------------------------
+
+def send_position(sock_path, path, line, col):
+    msg = json.dumps({"file": os.path.abspath(path),
+                      "line": line, "col": col})
+    client = socket.socket(socket.AF_UNIX)
+    try:
+        client.connect(sock_path)
+        client.sendall(msg.encode())
+    except (ConnectionRefusedError, FileNotFoundError):
+        sys.exit("lp-goals: no goals panel running — start the "
+                 "“Lambdapi: Goals Panel” task in Zed first.")
+    finally:
+        client.close()
+
+
+def run_once(path, line, col, show_logs=False):
+    path = os.path.abspath(path)
+    uri = file_uri(path)
+    lsp = LspSession()
+    lsp.start(file_uri(find_root(path)))
+    try:
+        lsp.open_doc(uri, open(path).read())
+        diags, checked = [], False
+        deadline = time.time() + 60
+        while time.time() < deadline and not checked:
+            for msg in lsp.drain(timeout=0.5):
+                if (msg.get("method") == "textDocument/publishDiagnostics"
+                        and msg.get("params", {}).get("uri") == uri):
+                    diags = msg["params"].get("diagnostics", [])
+                    checked = True
+        if not checked:
+            sys.exit("lp-goals: timed out waiting for lambdapi to check "
+                     + path)
+        mid = lsp.request_goals(uri, line - 1, col - 1)
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            for msg in lsp.drain(timeout=0.5):
+                if msg.get("id") == mid:
+                    result = msg.get("result", {})
+                    print("\n".join(format_goals(result, show_logs)))
+                    errs = format_diagnostics(diags)
+                    if errs:
+                        print()
+                        print("\n".join(errs))
+                    return
+        sys.exit("lp-goals: timed out waiting for goals")
+    finally:
+        lsp.stop()
+
+
+# --- entry point -------------------------------------------------------
+
+def parse_pos(args, what):
+    if not args:
+        sys.exit(f"lp-goals: {what} requires FILE LINE [COL]")
+    try:
+        line = int(args[0])
+        col = int(args[1]) if len(args) > 1 else 1
+    except ValueError:
+        sys.exit("lp-goals: LINE and COL must be integers (1-based)")
+    return line, col
+
+
+def main():
+    args = [a for a in sys.argv[1:] if a not in ("-h", "--help")]
+    if len(args) != len(sys.argv) - 1 or not args:
+        print(__doc__.strip())
+        sys.exit(0)
+
+    show_logs = "--logs" in args
+    args = [a for a in args if a != "--logs"]
+    cmd, rest = args[0], args[1:]
+    sock = default_socket_path()
+
+    if cmd == "serve":
+        Panel(sock, rest[0] if rest else None, show_logs).run()
+    elif cmd == "at":
+        if not rest:
+            sys.exit("lp-goals: at requires FILE LINE [COL]")
+        line, col = parse_pos(rest[1:], "at")
+        send_position(sock, rest[0], line, col)
+    elif cmd == "once":
+        if not rest:
+            sys.exit("lp-goals: once requires FILE LINE [COL]")
+        line, col = parse_pos(rest[1:], "once")
+        run_once(rest[0], line, col, show_logs)
+    else:
+        print(__doc__.strip())
+        sys.exit(f"\nlp-goals: unknown command {cmd!r}")
+
+
+if __name__ == "__main__":
+    main()

@@ -109,6 +109,13 @@ logs:
 	@echo "=== LSP log (recent) ==="
 	@tail -20 $(LSP_LOG)
 
+# --- Goals panel ---
+
+# Install the lp-goals terminal panel to ~/.local/bin
+install-goals:
+	install -Dm755 tools/lp-goals $(HOME)/.local/bin/lp-goals
+	@echo "Installed ~/.local/bin/lp-goals"
+
 # --- LSP integration tests ---
 
 # Run LSP integration tests against test/ corpus
@@ -122,4 +129,4 @@ test-lsp-v:
 # Run all tests (grammar + LSP)
 test-all: test test-lsp
 
-.PHONY: all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs test-lsp test-lsp-v test-all
+.PHONY: install-goals all grammar test parse highlight commit-grammar push-grammar sync local remote dev release status zed-logs lsp-logs zed-errors lsp-tail logs test-lsp test-lsp-v test-all
