@@ -281,6 +281,22 @@ impl zed::Extension for LambdaPiExtension {
                     code,
                 })
             }
+            // Module path (require/open and qualified-name
+            // completion). Rendered as a literal, NOT as code: a bare
+            // dotted path doesn't parse, and tree-sitter's error
+            // recovery then finds keyword fragments inside the
+            // identifiers ("on" in "Stdlib.Conj") and highlights
+            // them.
+            Some(zed::lsp::CompletionKind::Module) => {
+                Some(CodeLabel {
+                    spans: vec![CodeLabelSpan::literal(
+                        completion.label.clone(),
+                        None,
+                    )],
+                    filter_range: (0..name_len).into(),
+                    code: String::new(),
+                })
+            }
             // Declared symbol. Detail is filled in lazily by
             // [completionItem/resolve]; the initial render lands here
             // with [detail = ""], then re-renders when resolution
