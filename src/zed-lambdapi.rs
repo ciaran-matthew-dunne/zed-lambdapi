@@ -32,9 +32,10 @@ fn materialize_lp_goals() -> Result<String, String> {
     Ok(path)
 }
 
-/// Lambdapi binary path, --lib-root argument, optional --map-dir flags,
-/// and shell environment.
-type LambdapiEnv = (String, String, Vec<String>, Vec<(String, String)>);
+/// Lambdapi binary path, optional --lib-root argument, optional
+/// --map-dir flags, and shell environment.
+type LambdapiEnv =
+    (String, Option<String>, Vec<String>, Vec<(String, String)>);
 
 /// Find lambdapi binary, --lib-root arg, and any --map-dir overrides
 /// from worktree environment.
@@ -55,16 +56,14 @@ fn find_lambdapi(
         .or_else(|| worktree.which("lambdapi"))
         .ok_or("lambdapi not found. Install with: opam install lambdapi")?;
 
-    let lib_root_prefix = env
+    // Without LAMBDAPI_LIB_ROOT or an opam environment, omit --lib-root
+    // and let lambdapi use its built-in default, so non-opam installs
+    // (source builds, system packages) still get a working server.
+    let lib_root = env
         .iter()
         .find(|(k, _)| k == "LAMBDAPI_LIB_ROOT")
         .or_else(|| env.iter().find(|(k, _)| k == "OPAM_SWITCH_PREFIX"))
-        .map(|(_, v)| v.clone())
-        .ok_or(
-            "Neither LAMBDAPI_LIB_ROOT nor OPAM_SWITCH_PREFIX set. \
-             Run: eval $(opam env)",
-        )?;
-    let lib_root = format!("--lib-root={}/lib/lambdapi/lib_root", lib_root_prefix);
+        .map(|(_, v)| format!("--lib-root={}/lib/lambdapi/lib_root", v));
 
     let map_dirs: Vec<String> = env
         .iter()
@@ -93,11 +92,8 @@ impl zed::Extension for LambdaPiExtension {
     ) -> Result<zed::Command> {
         let (lambdapi_path, lib_root, map_dirs, env) = find_lambdapi(worktree)?;
 
-        let mut args = vec![
-            "lsp".to_string(),
-            "--standard-lsp".to_string(),
-            lib_root,
-        ];
+        let mut args = vec!["lsp".to_string(), "--standard-lsp".to_string()];
+        args.extend(lib_root);
         args.extend(map_dirs);
 
         // Launch the server through the embedded lp-goals bridge, a
@@ -106,7 +102,14 @@ impl zed::Extension for LambdaPiExtension {
         // edits included). Set LAMBDAPI_NO_BRIDGE to launch lambdapi
         // directly; set LAMBDAPI_LP_GOALS to a script path to use a
         // development copy instead of the embedded one.
-        let no_bridge = env.iter().any(|(k, _)| k == "LAMBDAPI_NO_BRIDGE");
+        //
+        // The bridge is a Python script run via its shebang, so it
+        // needs a Unix-like OS and python3 on PATH; anywhere that
+        // doesn't hold, launch lambdapi directly instead.
+        let (os, _arch) = zed::current_platform();
+        let no_bridge = env.iter().any(|(k, _)| k == "LAMBDAPI_NO_BRIDGE")
+            || matches!(os, zed::Os::Windows)
+            || worktree.which("python3").is_none();
         if !no_bridge {
             let script = env
                 .iter()
@@ -173,7 +176,8 @@ impl zed::Extension for LambdaPiExtension {
     ) -> Result<DebugAdapterBinary, String> {
         let (lambdapi_path, lib_root, map_dirs, env) = find_lambdapi(worktree)?;
         let command = user_provided_debug_adapter_path.unwrap_or(lambdapi_path);
-        let mut arguments = vec!["dap".to_string(), lib_root];
+        let mut arguments = vec!["dap".to_string()];
+        arguments.extend(lib_root);
         arguments.extend(map_dirs);
         Ok(DebugAdapterBinary {
             command: Some(command),
@@ -239,30 +243,12 @@ impl zed::Extension for LambdaPiExtension {
         let name_len = completion.label.len();
 
         match completion.kind {
-            // Tactic keyword. Detail is a one-line description, always
-            // present in the initial response.
-            Some(zed::lsp::CompletionKind::Keyword) => {
-                let code = if detail.is_empty() {
-                    completion.label.clone()
-                } else {
-                    format!("{} {}", completion.label, detail)
-                };
-                let mut spans = vec![CodeLabelSpan::code_range(0..name_len)];
-                if !detail.is_empty() {
-                    spans.push(CodeLabelSpan::literal(
-                        format!("  {}", detail),
-                        Some("comment".to_string()),
-                    ));
-                }
-                Some(CodeLabel {
-                    spans,
-                    filter_range: (0..name_len).into(),
-                    code,
-                })
-            }
-            // Hypothesis introduced by an earlier tactic. Detail carries
-            // the type ("h: π (x = y)").
-            Some(zed::lsp::CompletionKind::Variable) => {
+            // Tactic keyword (detail is a one-line description, always
+            // present in the initial response) or hypothesis introduced
+            // by an earlier tactic (detail carries the type,
+            // "h: π (x = y)").
+            Some(zed::lsp::CompletionKind::Keyword)
+            | Some(zed::lsp::CompletionKind::Variable) => {
                 let code = if detail.is_empty() {
                     completion.label.clone()
                 } else {
