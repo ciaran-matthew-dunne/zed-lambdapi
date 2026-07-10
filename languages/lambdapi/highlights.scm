@@ -12,12 +12,11 @@
 ;   @constructor   — red/pink (#ff6188)  — inductive constructors
 ;   @type          — cyan (#78dce8)      — inductive type names
 ;   @comment       — gray italic (#727072)
-;   @string        — yellow (#ffd866)    — "..."
+;   @string        — yellow (#ffd866)    — "...", module path prefixes
 ;   @variable      — white (#fcfcfa)     — identifiers
 ;   @label         — orange (#fc9867)    — pattern vars ($x)
 ;   @variable.special — purple (#ab9df2) — wildcards, metavars
 ;   @punctuation   — muted gray (#939293)
-;   @tag           — red/pink (#ff6188)  — module path prefixes
 
 ; ============================================
 ; COMMENTS
@@ -181,12 +180,6 @@
 ] @punctuation.bracket
 
 ; ============================================
-; ERROR HANDLING
-; ============================================
-
-(ERROR) @error
-
-; ============================================
 ; SPECIFIC OVERRIDES (highest precedence)
 ; ============================================
 ; Everything below here overrides the generic fallbacks above.
@@ -195,41 +188,25 @@
 
 "TYPE" @constant
 
-; --- Constructors — white (same as other symbols) ---
+; --- Inductive constructors — red/pink ---
 
 (constructor
-  (uid) @variable)
+  (uid) @constructor)
 
 ; --- Builtin bindings (builtin "T" ≔ τ) ---
 
 (builtin_command
-  "builtin" @keyword
   (string) @string.special)
 
 (flag_query
   (string) @string.special)
 
 ; --- Variables in binding positions ---
+; (let/have/set/generalize binders need no extra pattern: their keywords
+; are covered by the keyword arrays above and their (uid) by the fallback)
 
 (param
   (uid) @variable.parameter)
-
-(let_term
-  "let" @keyword
-  (uid) @variable)
-
-; Tactic bindings
-(tactic
-  "have" @keyword
-  (uid) @variable)
-
-(tactic
-  "set" @keyword
-  (uid) @variable)
-
-(tactic
-  "generalize" @keyword
-  (uid) @variable)
 
 ; --- Special variables — purple ---
 
@@ -250,8 +227,17 @@
 
 ; --- Module paths ---
 
-; Qualified names: Stdlib.Nat → module parts yellow, final part white
+; Qualified names: Stdlib.Nat → module prefix parts yellow, final part
+; white. Three separate patterns (instead of one sibling pattern) avoid
+; combinatorial sub-matches on paths with 3+ segments. The last pattern
+; marks exactly the prefix segments (each id_part immediately followed
+; by a dot); the final segment keeps @variable from the first pattern.
+(qualified_id
+  (id_part) @variable)
+
+(qualified_id
+  "." @punctuation.delimiter)
+
 (qualified_id
   (id_part) @string
-  "." @punctuation.delimiter
-  (id_part) @variable)
+  . ".")

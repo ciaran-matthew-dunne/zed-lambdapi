@@ -1,33 +1,25 @@
-name = "LambdaPi"
+name = "Lambdapi"
 grammar = "lambdapi"
 path_suffixes = ["lp"]
-line_comments = ["//"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
 tab_size = 2
 hard_tabs = false
-first_line_pattern = "^#![[:space:]]*lambdapi"
 
-# Define brackets for auto-closing and matching
+# Brackets for auto-closing and matching.
+# Auto-closing is disabled inside strings and comments via `not_in`,
+# which references the scopes captured in overrides.scm.
 brackets = [
-  { start = "(", end = ")", close = true, newline = true },
-  { start = "[", end = "]", close = true, newline = true },
-  { start = "{", end = "}", close = true, newline = true },
-  { start = "\"", end = "\"", close = true, newline = false },
-  { start = "/*", end = "*/", close = true, newline = true },
-  { start = "{|", end = "|}", close = true, newline = true },
+  { start = "(", end = ")", close = true, newline = true, not_in = ["string", "comment"] },
+  { start = "[", end = "]", close = true, newline = true, not_in = ["string", "comment"] },
+  { start = "{", end = "}", close = true, newline = true, not_in = ["string", "comment"] },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["string", "comment"] },
+  { start = "/*", end = "*/", close = true, newline = true, not_in = ["string", "comment"] },
+  # After typing "{" Zed already auto-closes "}", so typing "|" completes the
+  # escaped-identifier delimiter to "{||}" (same trick as the OCaml extension
+  # uses for its quoted-string syntax).
+  { start = "{|", end = "|", close = true, newline = true, not_in = ["string", "comment"] },
 ]
 
 # Word characters include special symbols used in identifiers
 word_characters = ["_", "$", "?", "@"]
-
-# Overrides for specific scopes
-[overrides.string]
-# In strings, disable some auto-closing brackets
-brackets = [
-  { start = "(", end = ")", close = false },
-  { start = "[", end = "]", close = false },
-  { start = "{", end = "}", close = false },
-]
-
-[overrides.comment]
-# In comments, disable all auto-closing brackets
-brackets = []

@@ -20,25 +20,19 @@
 (constructor
   (uid) @name) @item
 
-; Rule definitions
+; Rule definitions (scoped to rule_command so coerce rules do not get a
+; duplicate item from their own pattern below)
 (rule_command
-  "rule" @context
-  (rule)) @item
-
-(rule
-  (term) @name
-  (hook_arrow) @context
-  (term) @context) @item
+  (rule
+    (term) @name
+    (hook_arrow) @context
+    (term) @context) @item)
 
 ; Coerce rule definitions
 (coerce_rule_command
   "coerce_rule" @context
   (rule
     (term) @name)) @item
-
-; Unification rule definitions
-(unif_rule_command
-  "unif_rule" @context) @item
 
 ; Notation definitions
 (notation_command

@@ -1,6 +1,10 @@
-; Indentation rules for LambdaPi
+; Indentation rules for Lambdapi
+;
+; NOTE: Zed skips @indent captures whose node spans a single line, so
+; captures must target container nodes that can span multiple lines,
+; not individual keyword/operator tokens.
 
-; Indent inside blocks and groupings
+; Blocks and groupings
 [
   (proof)
   (subproof)
@@ -10,54 +14,24 @@
   (env)
 ] @indent
 
-; Indent inside command bodies
-(symbol_command
-  "symbol" @indent)
+; Multi-line commands
+[
+  (symbol_command)
+  (symbol_def_command)
+  (inductive_command)
+  (rule_command)
+  (builtin_command)
+  (coerce_rule_command)
+  (unif_rule_command)
+  (notation_command)
+] @indent
 
-(symbol_def_command
-  "symbol" @indent)
+; Multi-line terms
+(let_term) @indent
+(binder) @indent
 
-(inductive_command
-  "inductive" @indent)
-
-(inductive_def
-  ":" @indent)
-
-(constructor
-  ":" @indent)
-
-(let_term
-  "let" @indent)
-
-(let_term
-  "in" @indent)
-
-; Indent after rule arrows
-(rule
-  (hook_arrow) @indent)
-
-(unif_rule
-  (hook_arrow) @indent)
-
-; Indent in binders
-(binder
-  "," @indent)
-
-; Indent after type annotations
-(param_list
-  ":" @indent)
-
-; Indent inside proof tactics
+; Proof steps (tactic plus its subproofs)
 (proof_step) @indent
-
-(tactic
-  "have" @indent)
-
-(tactic
-  "apply" @indent)
-
-(tactic
-  "refine" @indent)
 
 ; Dedent on closing brackets and keywords
 [
@@ -69,4 +43,3 @@
   "admitted"
   "abort"
 ] @outdent
-
