@@ -11,8 +11,9 @@ including unsaved buffer contents — without a second lambdapi process.
 This script is embedded in the extension (via include_str!) and
 materialized into the extension work dir when the language server
 starts; the bridge then symlinks itself to ~/.local/bin/lp-goals so
-the Zed tasks can invoke it. There is nothing to install by hand —
-tools/lp-goals in the repo is the source of truth.
+the Zed tasks can invoke it (only when that directory already
+exists; opt out with LAMBDAPI_NO_INSTALL). There is nothing to
+install by hand — tools/lp-goals in the repo is the source of truth.
 
 Usage:
     lp-goals serve [FILE]            Run the goals panel (persistent).
@@ -39,25 +40,32 @@ Environment:
     LAMBDAPI_PATH        lambdapi binary (default: `which lambdapi`)
     LAMBDAPI_LIB_ROOT    lib root prefix (default: $OPAM_SWITCH_PREFIX)
     LAMBDAPI_MAP_DIRS    comma-separated MOD:DIR --map-dir overrides
-    LP_GOALS_SOCKET      panel socket override (default: per-user tmp)
+    LP_GOALS_SOCKET      panel socket override (default: per-user dir)
     LP_BRIDGE_SOCKET     bridge socket override
+    LAMBDAPI_NO_INSTALL  don't link lp-goals into ~/.local/bin
     NO_COLOR             disable ANSI colors
 """
 
+import errno
 import glob
 import hashlib
 import json
 import os
+import re
 import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
-import termios
+import tempfile
 import time
-import tty
 import urllib.parse
+
+# termios and tty (terminal control for the panel's keyboard handling)
+# are imported lazily in Panel.setup_keys / restore_keys so the bridge,
+# `at` and `once` modes never depend on these Unix-only modules.
 
 # --- terminal styling -------------------------------------------------
 
@@ -83,29 +91,64 @@ def rule(char="─"):
 # --- paths and environment --------------------------------------------
 
 def runtime_dir():
-    d = os.environ.get("XDG_RUNTIME_DIR")
-    return d if d and os.path.isdir(d) else "/tmp"
+    """Private per-user directory for the panel and bridge sockets.
+
+    A `lp-goals-<uid>` subdirectory (mode 0700) of $XDG_RUNTIME_DIR,
+    or of the system temp dir when that is unset. Returns None when
+    the directory cannot be created or is not a directory we own
+    (e.g. squatted in a shared /tmp); callers fail open."""
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not (base and os.path.isdir(base)):
+        base = tempfile.gettempdir()
+    d = os.path.join(base, f"lp-goals-{os.getuid()}")
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        st = os.lstat(d)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            return None
+        if stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(d, 0o700)
+    except OSError:
+        return None
+    return d
 
 
 def panel_socket_path():
     if os.environ.get("LP_GOALS_SOCKET"):
         return os.environ["LP_GOALS_SOCKET"]
-    return os.path.join(runtime_dir(), f"lp-goals-{os.getuid()}.sock")
+    d = runtime_dir()
+    return os.path.join(d, "panel.sock") if d else None
 
 
 def bridge_socket_path(root_uri):
+    """Socket path for this bridge instance. The name embeds both the
+    workspace root (for discovery filtering) and the pid (so two Zed
+    windows on the same project never collide). None = fail open."""
     if os.environ.get("LP_BRIDGE_SOCKET"):
         return os.environ["LP_BRIDGE_SOCKET"]
+    d = runtime_dir()
+    if d is None:
+        return None
     digest = hashlib.sha1(root_uri.encode()).hexdigest()[:10]
-    return os.path.join(runtime_dir(), f"lp-bridge-{digest}.sock")
+    return os.path.join(d, f"lp-bridge-{digest}-{os.getpid()}.sock")
 
 
 def bridge_socket_candidates():
     override = os.environ.get("LP_BRIDGE_SOCKET")
     if override:
         return [override] if os.path.exists(override) else []
-    pattern = os.path.join(runtime_dir(), "lp-bridge-*.sock")
-    return sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    d = runtime_dir()
+    if d is None:
+        return []
+
+    def mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0.0
+
+    pattern = os.path.join(d, "lp-bridge-*.sock")
+    return sorted(glob.glob(pattern), key=mtime, reverse=True)
 
 
 def find_lambdapi_cmd():
@@ -128,7 +171,7 @@ def find_lambdapi_cmd():
 
 
 def file_uri(path):
-    return "file://" + os.path.abspath(path)
+    return "file://" + urllib.parse.quote(os.path.abspath(path), safe="/")
 
 
 def uri_to_path(uri):
@@ -144,28 +187,37 @@ def ensure_on_path():
     work directory, so users never install it by hand; the bridge
     (the first mode to run, when Zed starts the language server)
     symlinks itself onto PATH so the `lp-goals serve` / `lp-goals at`
-    tasks can find it. A regular file (manual install) is left alone;
-    a symlink we own is retargeted when the extension updates.
+    tasks can find it. Conservative by design:
+    - LAMBDAPI_NO_INSTALL set: do nothing.
+    - ~/.local/bin must already exist; we never create directories
+      in $HOME.
+    - A regular file (manual install) is left alone.
+    - Only symlinks that provably point into a Zed extension work
+      dir (an "extensions/work" path segment) are retargeted when
+      the extension updates; foreign symlinks — even dangling ones —
+      are never touched.
+    Failures are swallowed: PATH setup must never break the LSP.
     """
-    if os.name != "posix":
+    if os.name != "posix" or os.environ.get("LAMBDAPI_NO_INSTALL"):
         return
     try:
         target = os.path.realpath(os.path.abspath(__file__))
         bindir = os.path.expanduser("~/.local/bin")
+        if not os.path.isdir(bindir):
+            return
         link = os.path.join(bindir, "lp-goals")
         if os.path.islink(link):
-            dest = os.readlink(link)
             if os.path.realpath(link) == target:
                 return
-            ours = ("zed/extensions" in dest.lower()
-                    or not os.path.exists(os.path.realpath(link)))
+            parts = os.readlink(link).lower().split(os.sep)
+            ours = any(a == "extensions" and b == "work"
+                       for a, b in zip(parts, parts[1:]))
             if ours:
                 os.unlink(link)
                 os.symlink(target, link)
             return
         if os.path.exists(link):
             return
-        os.makedirs(bindir, exist_ok=True)
         os.symlink(target, link)
     except OSError:
         pass
@@ -174,7 +226,8 @@ def ensure_on_path():
 def find_root(path):
     """Walk up from the file looking for lambdapi.pkg; that directory
     (or the file's own directory) becomes the LSP rootUri."""
-    d = os.path.dirname(os.path.abspath(path))
+    path = os.path.abspath(path)
+    d = path if os.path.isdir(path) else os.path.dirname(path)
     cur = d
     while True:
         if os.path.isfile(os.path.join(cur, "lambdapi.pkg")):
@@ -204,26 +257,35 @@ class MsgBuffer:
             yield msg
 
     def _parse_one(self):
-        sep = self.buf.find(b"\r\n\r\n")
-        if sep < 0:
-            return None
-        length = None
-        for line in self.buf[:sep].split(b"\r\n"):
-            key, _, val = line.partition(b":")
-            if key.strip().lower() == b"content-length":
-                length = int(val.strip())
-        if length is None:
-            self.buf = self.buf[sep + 4:]
-            return None
-        start = sep + 4
-        if len(self.buf) < start + length:
-            return None
-        body = self.buf[start:start + length]
-        self.buf = self.buf[start + length:]
-        try:
-            return json.loads(body.decode())
-        except json.JSONDecodeError:
-            return None
+        while True:
+            sep = self.buf.find(b"\r\n\r\n")
+            if sep < 0:
+                return None
+            length = None
+            for line in self.buf[:sep].split(b"\r\n"):
+                key, _, val = line.partition(b":")
+                if key.strip().lower() == b"content-length":
+                    try:
+                        length = int(val.strip())
+                    except ValueError:
+                        length = None
+            if length is None or length < 0:
+                # Malformed header: drop it and keep scanning so
+                # messages queued behind it are not delayed.
+                self.buf = self.buf[sep + 4:]
+                continue
+            start = sep + 4
+            if len(self.buf) < start + length:
+                return None
+            body = self.buf[start:start + length]
+            self.buf = self.buf[start + length:]
+            try:
+                # json.loads accepts bytes; ValueError also covers
+                # UnicodeDecodeError from invalid UTF-8 bodies, so a
+                # bad frame is consumed instead of killing the caller.
+                return json.loads(body)
+            except ValueError:
+                continue
 
 
 def lsp_frame(msg):
@@ -287,19 +349,28 @@ class Bridge:
         self.diags = {}            # uri -> last publishDiagnostics params
         self.inject_id = INJECT_BASE
         self.injected = {}         # bridged id -> (client sock, original id)
+        self.srv_pending = bytearray()   # queued writes to the server
 
     # -- socket side channel (fail-open) ---------------------------
 
     def open_listener(self):
+        """Bind the side-channel socket. The path is unique to this
+        process (pid suffix), so an existing file is never unlinked —
+        stale sockets are garbage-collected by panel discovery. Any
+        failure just leaves the bridge without a listener."""
+        self.listener = None
+        path = bridge_socket_path(self.root_uri)
+        if path is None:
+            return
         try:
-            self.sock_path = bridge_socket_path(self.root_uri)
-            if os.path.exists(self.sock_path):
-                os.unlink(self.sock_path)
-            self.listener = socket.socket(socket.AF_UNIX)
-            self.listener.bind(self.sock_path)
-            self.listener.listen(8)
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(path)
+            os.chmod(path, 0o600)
+            listener.listen(8)
         except OSError:
-            self.listener = None
+            return
+        self.sock_path = path
+        self.listener = listener
 
     def hello(self):
         return {"type": "hello", "root": self.root_uri,
@@ -329,7 +400,7 @@ class Bridge:
     def handle_client_line(self, sock, line):
         try:
             req = json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:
             return
         method = req.get("method")
         if method not in INJECTABLE:
@@ -409,11 +480,22 @@ class Bridge:
     # -- plumbing ----------------------------------------------------
 
     def to_server(self, msg):
-        try:
-            self.proc.stdin.write(lsp_frame(msg))
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError):
-            pass
+        self.srv_pending += lsp_frame(msg)
+        self.flush_server()
+
+    def flush_server(self):
+        """Write queued bytes to the server's stdin without blocking;
+        whatever does not fit goes out when select() reports the pipe
+        writable, so a stalled server can never wedge the proxy."""
+        while self.srv_pending:
+            try:
+                n = os.write(self.proc.stdin.fileno(), self.srv_pending)
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError:
+                self.srv_pending.clear()   # server gone; drop the queue
+                return
+            del self.srv_pending[:n]
 
     def to_zed(self, msg):
         sys.stdout.buffer.write(lsp_frame(msg))
@@ -436,13 +518,18 @@ class Bridge:
         zed_in = sys.stdin.buffer
         os.set_blocking(zed_in.fileno(), False)
         os.set_blocking(self.proc.stdout.fileno(), False)
+        os.set_blocking(self.proc.stdin.fileno(), False)
         try:
             while True:
                 fds = [zed_in, self.proc.stdout]
                 if self.listener:
                     fds.append(self.listener)
                 fds.extend(self.clients)
-                ready, _, _ = select.select(fds, [], [], 1.0)
+                wfds = [self.proc.stdin] if self.srv_pending else []
+                ready, writable, _ = select.select(fds, wfds, [], 1.0)
+
+                if writable:
+                    self.flush_server()
 
                 if zed_in in ready:
                     data = zed_in.read()
@@ -527,11 +614,21 @@ class BridgeBackend:
     @classmethod
     def connect(cls, path, want_path=None):
         """Attach to the bridge at [path]; returns None if unusable or
-        if its workspace root does not contain [want_path]."""
+        if its workspace root does not contain [want_path]. Sockets
+        whose bridge is provably dead are unlinked (self-cleaning)."""
+        sock = socket.socket(socket.AF_UNIX)
+        sock.settimeout(2.0)
         try:
-            sock = socket.socket(socket.AF_UNIX)
-            sock.settimeout(2.0)
             sock.connect(path)
+        except OSError as e:
+            sock.close()
+            if isinstance(e, ConnectionRefusedError):
+                try:
+                    os.unlink(path)   # dead bridge left its socket behind
+                except OSError:
+                    pass
+            return None
+        try:
             buf = b""
             while b"\n" not in buf:
                 data = sock.recv(65536)
@@ -541,7 +638,7 @@ class BridgeBackend:
             hello = json.loads(buf.split(b"\n", 1)[0])
             if hello.get("type") != "hello":
                 raise OSError("bad hello")
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             try:
                 sock.close()
             except OSError:
@@ -606,7 +703,7 @@ class BridgeBackend:
             line, _, self.buf = self.buf.partition(b"\n")
             try:
                 ev = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
                 continue
             kind = ev.get("type")
             if kind == "notif":
@@ -741,6 +838,19 @@ class LocalBackend:
 
 # --- goal formatting ----------------------------------------------------
 
+# Server-provided text is rendered straight into a terminal: strip
+# escape sequences and control characters (keeping \n and \t) so a
+# hostile diagnostic or goal cannot inject cursor movement or worse.
+_CONTROL = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"       # CSI sequences
+    r"|\x1b."                          # other ESC sequences
+    r"|[\x00-\x08\x0b-\x1f\x7f]")      # C0 controls except \t and \n
+
+
+def sanitize(text):
+    return _CONTROL.sub("", str(text))
+
+
 def format_goals(result, show_logs=False, clamped=False):
     """Render a proof/goals result. Returns a list of lines."""
     lines = []
@@ -758,21 +868,22 @@ def format_goals(result, show_logs=False, clamped=False):
             kind = goal.get("typeofgoal", "?")
             hyps = goal.get("hyps", [])
             if kind == "Typ":
-                gid = goal.get("gid", "?")
+                gid = sanitize(goal.get("gid", "?"))
                 head = (f"{BOLD}{CYAN}Goal {i + 1} of {n}{RESET} "
                         f"{DIM}({gid}){RESET}")
             else:
                 head = f"{BOLD}{MAGENTA}Unification goal {i + 1} of {n}{RESET}"
             lines.append(head)
             if hyps:
-                width = max(len(h["hname"]) for h in hyps)
-                for h in hyps:
+                names = [sanitize(h.get("hname", "?")) for h in hyps]
+                width = max(len(name) for name in names)
+                for name, h in zip(names, hyps):
                     # htype carries its own separator: ": ty" or "≔ def"
-                    lines.append(f"  {GREEN}{h['hname']:<{width}}{RESET} "
-                                 f"{h['htype'].strip()}")
+                    htype = sanitize(h.get("htype", "")).strip()
+                    lines.append(f"  {GREEN}{name:<{width}}{RESET} {htype}")
             lines.append(rule())
             body = goal.get("type") if kind == "Typ" else goal.get("constr")
-            lines.append(f"  {BOLD}⊢ {body}{RESET}")
+            lines.append(f"  {BOLD}⊢ {sanitize(body)}{RESET}")
             if i < n - 1:
                 lines.append("")
     logs = result.get("logs", "")
@@ -780,7 +891,7 @@ def format_goals(result, show_logs=False, clamped=False):
         lines.append("")
         lines.append(f"{DIM}── logs {'─' * 20}{RESET}")
         tail = logs.strip().splitlines()[-12:]
-        lines.extend(f"{DIM}{ln}{RESET}" for ln in tail)
+        lines.extend(f"{DIM}{sanitize(ln)}{RESET}" for ln in tail)
     return lines
 
 
@@ -793,7 +904,7 @@ def format_diagnostics(diags, limit=6):
         color = RED if sev == 1 else YELLOW
         pos = d.get("range", {}).get("start", {})
         line = pos.get("line", 0) + 1
-        msg = " ".join(d.get("message", "").split())
+        msg = sanitize(" ".join(d.get("message", "").split()))
         if len(msg) > 400:
             msg = msg[:400] + "…"
         lines.append(f"{color}✗ L{line}:{RESET} {msg}")
@@ -833,6 +944,9 @@ class Panel:
     # -- 'at' ping socket -------------------------------------------
 
     def bind_socket(self):
+        if self.sock_path is None:
+            sys.exit("lp-goals: no private runtime directory for the "
+                     "panel socket (set LP_GOALS_SOCKET to override)")
         if os.path.exists(self.sock_path):
             probe = socket.socket(socket.AF_UNIX)
             try:
@@ -840,11 +954,23 @@ class Panel:
                 sys.exit(f"lp-goals: another panel is already running "
                          f"({self.sock_path})")
             except (ConnectionRefusedError, FileNotFoundError):
-                os.unlink(self.sock_path)   # stale socket
+                try:
+                    os.unlink(self.sock_path)   # stale socket
+                except OSError:
+                    pass
+            except OSError:
+                pass            # unknown state; let bind() decide below
             finally:
                 probe.close()
         self.server = socket.socket(socket.AF_UNIX)
-        self.server.bind(self.sock_path)
+        try:
+            self.server.bind(self.sock_path)
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                sys.exit(f"lp-goals: another panel is already running "
+                         f"({self.sock_path})")
+            raise
+        os.chmod(self.sock_path, 0o600)
         self.server.listen(8)
 
     # -- backend management ------------------------------------------
@@ -917,7 +1043,8 @@ class Panel:
             if old_uri:
                 self.backend.close_file(old_uri)
             try:
-                text = open(path).read()
+                text = open(path, encoding="utf-8",
+                            errors="replace").read()
                 self.mtime = os.path.getmtime(path)
             except OSError as e:
                 self.status = f"cannot read {path}: {e}"
@@ -929,7 +1056,8 @@ class Panel:
 
     def reload_local(self):
         try:
-            text = open(self.file).read()
+            text = open(self.file, encoding="utf-8",
+                        errors="replace").read()
         except OSError:
             return
         self.backend.sync_file(self.uri, text)
@@ -985,7 +1113,7 @@ class Panel:
     def handle_client(self, data):
         try:
             req = json.loads(data)
-        except json.JSONDecodeError:
+        except ValueError:
             return
         path = req.get("file")
         line = req.get("line")
@@ -1076,6 +1204,11 @@ class Panel:
         """Single-key controls when running in a real terminal."""
         if not sys.stdin.isatty():
             return
+        try:                       # Unix-only; imported lazily so the
+            import termios         # other modes never depend on them
+            import tty
+        except ImportError:
+            return
         try:
             self.termios_saved = termios.tcgetattr(sys.stdin.fileno())
             tty.setcbreak(sys.stdin.fileno())
@@ -1083,12 +1216,14 @@ class Panel:
             self.termios_saved = None
 
     def restore_keys(self):
-        if self.termios_saved is not None:
-            try:
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
-                                  self.termios_saved)
-            except termios.error:
-                pass
+        if self.termios_saved is None:
+            return
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                              self.termios_saved)
+        except Exception:
+            pass
 
     def teardown(self):
         try:
@@ -1166,7 +1301,7 @@ class Panel:
                 try:
                     data = conn.recv(65536)
                     if data:
-                        self.handle_client(data.decode())
+                        self.handle_client(data.decode(errors="replace"))
                 except OSError:
                     pass
                 finally:
@@ -1191,6 +1326,9 @@ class Panel:
 # --- client + one-shot modes ----------------------------------------------
 
 def send_position(sock_path, path, line, col):
+    if sock_path is None:
+        sys.exit("lp-goals: no goals panel running — start the "
+                 "“Lambdapi: Goals Panel” task in Zed first.")
     msg = json.dumps({"file": os.path.abspath(path),
                       "line": line, "col": col})
     client = socket.socket(socket.AF_UNIX)
@@ -1209,7 +1347,8 @@ def run_once(path, line, col, show_logs=False):
     uri = file_uri(path)
     backend = LocalBackend(file_uri(find_root(path)))
     try:
-        backend.sync_file(uri, open(path).read())
+        backend.sync_file(uri, open(path, encoding="utf-8",
+                                    errors="replace").read())
         diags, checked = [], False
         deadline = time.time() + 60
         while time.time() < deadline and not checked:
