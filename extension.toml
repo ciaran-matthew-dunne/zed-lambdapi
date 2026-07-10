@@ -1,10 +1,10 @@
-id = "zed-lambdapi"
-name = "LambdaPi"
+id = "lambdapi"
+name = "Lambdapi"
 version = "0.0.1"
 schema_version = 1
 authors = ["Ciarán Dunne <cciaranddunne@gmail.com>"]
-description = "Support for LambdaPi in Zed"
-repository = "https://github.com/fblanqui/lambdapi"
+description = "Support for the Lambdapi proof assistant"
+repository = "https://github.com/Deducteam/lambdapi"
 
 [grammars.lambdapi]
 repository = "https://github.com/ciaran-matthew-dunne/tree-sitter-lambdapi"
@@ -13,7 +13,7 @@ path = "grammars"
 
 [language_servers.lambdapi-lsp]
 name = "lambdapi-lsp"
-languages = ["LambdaPi"]
+languages = ["Lambdapi"]
 
 [debug_adapters.lambdapi]
 # Schema describing the launch configuration shape this adapter accepts.

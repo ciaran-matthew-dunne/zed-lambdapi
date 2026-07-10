@@ -8,3 +8,10 @@ Cargo.lock
 
 # Built extension WASM
 extension.wasm
+
+# Local dev files
+.claude/
+.venv/
+__pycache__/
+test/.*.log
+.zed/zed-keymap.json

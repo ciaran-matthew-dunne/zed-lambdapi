@@ -1,4 +1,4 @@
-# zed-lambdapi
+# Lambdapi for Zed
 
 [Zed](https://zed.dev) extension for [Lambdapi](https://github.com/Deducteam/lambdapi), a proof assistant based on the lambda-Pi-calculus modulo rewriting.
 
@@ -7,16 +7,20 @@
 - **Syntax highlighting** — full coverage of Lambdapi syntax: commands, tactics, modifiers, rewrite rules, unicode operators, pattern variables, qualified identifiers, and more
 - **LSP integration** — hover info, go-to-definition, document symbols, and diagnostics via the Lambdapi language server
 - **Code outline** — navigate symbols, inductive types, constructors, rules, and notations in the symbol panel
-- **Code folding** — fold proof blocks, inductive definitions, and rule groups
 - **Auto-indentation** — context-aware indentation for proofs, rules, and blocks
 - **Bracket matching** — pairs for `()`, `[]`, `{}`
+- **Unicode snippets** — 2400+ optional snippets for math symbols (`→`, `λ`, `Π`, `∀`, …), named after LaTeX conventions (see [Unicode Input](#unicode-input))
 - **Interactive proof goals** — a terminal goals panel (`lp-goals`) that follows your cursor as you type and shows the live proof state, like the VS Code extension's goals view
-- **Proof debugger** — line breakpoints on tactic lines, step / continue, goals + hypotheses panel, via the `lambdapi dap` Debug Adapter Protocol server
+- **Proof debugger** — line breakpoints on tactic lines, step / continue, goals + hypotheses panel, via the `lambdapi dap` Debug Adapter Protocol server (requires a Lambdapi build with the `dap` command, not yet in upstream releases)
 
 ## Requirements
 
 - [Zed](https://zed.dev) editor
 - [opam](https://opam.ocaml.org/) with an active switch
+- Python 3 on your `PATH` (for the goals panel; on macOS, install the
+  Xcode Command Line Tools or a python.org build). Without it — and on
+  Windows — the extension still provides highlighting and the language
+  server, just not the goals panel.
 
 ## Installation
 
@@ -64,7 +68,9 @@ Type a symbol name (e.g. `to`, `lambda`, `forall`, `coloneq`) and select it from
 
 ### Setup
 
-Copy [`snippets/lambdapi.json`](snippets/lambdapi.json) to your Zed snippets directory:
+The snippets are not bundled with the extension — install them by
+copying [`snippets/lambdapi.json`](snippets/lambdapi.json) to your Zed
+snippets directory:
 
 ```bash
 mkdir -p ~/.config/zed/snippets
@@ -92,10 +98,13 @@ session and re-checks the file on save.)
 
 There is nothing to install: the first time the language server
 starts, the extension materializes `lp-goals` into its work directory
-and links it at `~/.local/bin/lp-goals` (kept up to date across
-extension updates; a manually installed copy is never overwritten).
-Make sure `~/.local/bin` is on your `PATH`. For use outside Zed,
-`make install-goals` copies the tool there directly.
+and links it at `~/.local/bin/lp-goals` — but only if that directory
+already exists, and it never overwrites anything except a link left by
+a previous install of this extension. Make sure `~/.local/bin` is on
+your `PATH`; set `LAMBDAPI_NO_INSTALL=1` to disable the linking
+entirely. For manual installation (e.g. on macOS, where `~/.local/bin`
+usually doesn't exist), `make install-goals` copies the tool there
+directly from a checkout.
 
 Add the two tasks to `~/.config/zed/tasks.json` (or a project's
 `.zed/tasks.json`):
@@ -171,6 +180,7 @@ It resolves `lambdapi` the same way the extension does (`LAMBDAPI_PATH`,
 src/zed-lambdapi.rs              Extension entry point (LSP, labels, DAP)
 extension.toml                    Extension manifest
 tools/lp-goals                    Goals panel + LSP bridge
+snippets/lambdapi.json            Unicode-math snippets (manual install)
 debug_adapter_schemas/
   lambdapi.json                   Schema for `.zed/debug.json` entries
 languages/lambdapi/
@@ -178,15 +188,15 @@ languages/lambdapi/
   highlights.scm                  Syntax highlighting queries
   outline.scm                     Symbol outline queries
   brackets.scm                    Bracket matching
-  folds.scm                       Code folding
   indents.scm                     Auto-indentation
-  locals.scm                      Scope-aware highlighting
-  tags.scm                        Symbol tags
   injections.scm                  Embedded languages
   overrides.scm                   Context-dependent settings
 ```
 
 ## Debugging proofs
+
+The proof debugger needs a Lambdapi build that provides the
+`lambdapi dap` command; it is not yet part of upstream releases.
 
 Add a `.zed/debug.json` next to your project (an example lives in `test/.zed/debug.json`):
 
