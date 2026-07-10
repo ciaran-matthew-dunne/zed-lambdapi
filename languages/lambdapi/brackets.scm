@@ -9,8 +9,8 @@
 ; Curly braces
 ("{" @open "}" @close)
 
-; Escaped identifiers
-; ("{|" @open "|}" @close)
+; Escaped identifiers: {| |} is a single regex token (escaped_id),
+; so bracket matching is not possible at the tree-sitter level.
 
-; ; String quotes
-; ("\"" @open "\"" @close)
+; String quotes: " " is a single regex token (string),
+; so bracket matching is not possible at the tree-sitter level.
